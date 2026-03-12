@@ -95,7 +95,7 @@ async fn auth_password<S: AsyncRead + AsyncWrite + Unpin>(
         username: Some(username.to_string()),
         password: Some(password),
         version: Some(CLIENT_VERSION.to_string()),
-        want_mux: Some(true),
+        want_mux: None, // MUX channel protocol not yet implemented in Rust client
         caps: Some(CLIENT_CAPS.iter().map(|s| s.to_string()).collect()),
     };
     wire::send_json(&mut client.stream, &auth_req)
@@ -257,7 +257,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RshClient<S> {
             username: None,
             password: None,
             version: Some(CLIENT_VERSION.to_string()),
-            want_mux: Some(true),
+            want_mux: None, // MUX channel protocol not yet implemented in Rust client
             caps: Some(CLIENT_CAPS.iter().map(|s| s.to_string()).collect()),
         };
         wire::send_json(&mut self.stream, &auth_req)

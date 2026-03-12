@@ -376,13 +376,20 @@ Binaries are placed in `target/release/rsh` (~5.5 MB) and `target/x86_64-pc-wind
 
 ### Generating Keys
 
-rsh uses standard SSH ed25519 keys:
+rsh has a built-in key generator (no OpenSSH required):
 
 ```bash
-ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519
+# Generate ed25519 key pair (default: ~/.rsh/id_ed25519 + .pub)
+rsh keygen
+
+# Generate to custom path
+rsh keygen /path/to/mykey
+
 # Copy public key to server
-rsh -h host push ~/.ssh/id_ed25519.pub C:\ProgramData\remote-shell\authorized_keys
+rsh -h host push ~/.rsh/id_ed25519.pub C:\ProgramData\remote-shell\authorized_keys
 ```
+
+Standard SSH ed25519 keys (`ssh-keygen -t ed25519`) also work — rsh uses the same OpenSSH format.
 
 ## Architecture
 
