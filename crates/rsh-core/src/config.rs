@@ -21,6 +21,8 @@ pub struct HostConfig {
     pub rendezvous_key: Option<String>,
     /// Per-host session logging override (true/false). None = inherit global.
     pub session_log: Option<bool>,
+    /// QUIC port for this host (if QUIC transport is enabled on the server).
+    pub quic_port: Option<u16>,
 }
 
 impl HostConfig {
@@ -39,6 +41,7 @@ impl HostConfig {
             rendezvous_servers: Vec::new(),
             rendezvous_key: None,
             session_log: None,
+            quic_port: None,
         }
     }
 
@@ -207,6 +210,13 @@ impl Config {
                         host.rendezvous_key = Some(value.to_string());
                     } else {
                         cfg.rendezvous_key = Some(value.to_string());
+                    }
+                }
+                "quicport" => {
+                    if let Some(ref mut host) = current_host
+                        && let Ok(p) = value.parse::<u16>()
+                    {
+                        host.quic_port = Some(p);
                     }
                 }
                 "enrollmenttoken" => {

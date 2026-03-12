@@ -339,6 +339,7 @@ mod tests {
             rendezvous_servers: Vec::new(),
             rendezvous_key: None,
             session_log: None,
+            quic_port: None,
         }
     }
 

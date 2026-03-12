@@ -266,6 +266,7 @@ impl App {
             rendezvous_servers: split_servers(&self.inputs[10]),
             rendezvous_key: opt_str(&self.inputs[11]),
             session_log: parse_opt_bool(&self.inputs[12]),
+            quic_port: None,
         };
 
         let idx = self.edit_idx;
@@ -984,6 +985,7 @@ mod tests {
             rendezvous_servers: vec![],
             rendezvous_key: None,
             session_log: None,
+            quic_port: None,
         };
         assert_eq!(host_description(&h), "example.com");
     }
@@ -1004,6 +1006,7 @@ mod tests {
             rendezvous_servers: vec![],
             rendezvous_key: None,
             session_log: None,
+            quic_port: None,
         };
         assert_eq!(host_description(&h), "example.com:22");
     }
@@ -1024,6 +1027,7 @@ mod tests {
             rendezvous_servers: vec![],
             rendezvous_key: None,
             session_log: None,
+            quic_port: None,
         };
         assert_eq!(host_description(&h), "(no hostname)");
     }
@@ -1044,6 +1048,7 @@ mod tests {
             rendezvous_servers: vec![],
             rendezvous_key: None,
             session_log: None,
+            quic_port: None,
         };
         let desc = host_description(&h);
         assert!(desc.contains("dev-server"));

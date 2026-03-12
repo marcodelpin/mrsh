@@ -24,6 +24,10 @@ pub struct HostStatus {
     pub rendezvous_server: Option<String>,
     /// Rendezvous key for relay fallback.
     pub rendezvous_key: Option<String>,
+    /// QUIC port for this host (None = QUIC not configured).
+    pub quic_port: Option<u16>,
+    /// Transport used to reach the host ("tls", "relay", "quic").
+    pub transport: &'static str,
 }
 
 /// Maximum concurrent probes.
@@ -53,10 +57,11 @@ pub async fn status(config: &Config) -> Vec<HostStatus> {
         let device_id = host.device_id.clone();
         let rdv_server = config.rendezvous_server.clone();
         let rdv_key = config.rendezvous_key.clone();
+        let quic_port = host.quic_port;
 
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.ok();
-            probe_host(&name, &hostname, port, device_id, rdv_server, rdv_key).await
+            probe_host(&name, &hostname, port, device_id, rdv_server, rdv_key, quic_port).await
         }));
     }
 
@@ -72,7 +77,7 @@ pub async fn status(config: &Config) -> Vec<HostStatus> {
 }
 
 /// Probe a single host for version and capabilities.
-/// Tries direct connection first; falls back to relay if device_id is present.
+/// Tries TLS direct first, then relay, then QUIC (if quic_port configured).
 async fn probe_host(
     name: &str,
     hostname: &str,
@@ -80,11 +85,12 @@ async fn probe_host(
     device_id: Option<String>,
     rdv_server: Option<String>,
     rdv_key: Option<String>,
+    quic_port: Option<u16>,
 ) -> HostStatus {
     let start = Instant::now();
     debug!("probing {} ({}:{})", name, hostname, port);
 
-    // Try direct connection first
+    // Try direct TLS connection first
     let result = tokio::time::timeout(PROBE_TIMEOUT, async {
         let opts = crate::client::ConnectOptions {
             host: hostname.to_string(),
@@ -111,9 +117,11 @@ async fn probe_host(
             device_id,
             rendezvous_server: rdv_server,
             rendezvous_key: rdv_key,
+            quic_port,
+            transport: "tls",
         },
         direct_err => {
-            // Direct failed — try relay if device_id present
+            // Direct TLS failed — try relay if device_id present
             if let Some(ref dev_id) = device_id {
                 let relay_start = Instant::now();
                 debug!("direct failed for {}, trying relay via {}", name, dev_id);
@@ -147,6 +155,8 @@ async fn probe_host(
                             device_id: Some(dev_id.clone()),
                             rendezvous_server: rdv_server,
                             rendezvous_key: rdv_key,
+                            quic_port,
+                            transport: "relay",
                         };
                     }
                     Ok(Err(relay_e)) => {
@@ -158,7 +168,48 @@ async fn probe_host(
                 }
             }
 
-            // Both failed (or no device_id)
+            // TLS + relay failed — try QUIC if configured
+            #[cfg(feature = "quic")]
+            if let Some(qport) = quic_port {
+                let quic_start = Instant::now();
+                debug!("tls+relay failed for {}, trying QUIC on port {}", name, qport);
+                let addr_str = format!("{}:{}", hostname, qport);
+                if let Ok(addr) = addr_str.parse() {
+                    match tokio::time::timeout(
+                        PROBE_TIMEOUT,
+                        crate::quic::QuicClient::connect(addr, hostname, None),
+                    )
+                    .await
+                    {
+                        Ok(Ok(client)) => {
+                            let quic_latency = quic_start.elapsed().as_millis() as u64;
+                            return HostStatus {
+                                name: name.to_string(),
+                                hostname: hostname.to_string(),
+                                port,
+                                online: true,
+                                version: client.server_version,
+                                caps: client.server_caps,
+                                latency_ms: quic_latency,
+                                error: None,
+                                device_id,
+                                rendezvous_server: rdv_server,
+                                rendezvous_key: rdv_key,
+                                quic_port: Some(qport),
+                                transport: "quic",
+                            };
+                        }
+                        Ok(Err(e)) => {
+                            debug!("QUIC also failed for {}: {}", name, e);
+                        }
+                        Err(_) => {
+                            debug!("QUIC timeout for {}", name);
+                        }
+                    }
+                }
+            }
+
+            // All transports failed
             let error_msg = match direct_err {
                 Ok(Err(e)) => format!("{}", e),
                 Err(_) => "timeout".to_string(),
@@ -176,6 +227,8 @@ async fn probe_host(
                 device_id,
                 rendezvous_server: rdv_server,
                 rendezvous_key: rdv_key,
+                quic_port,
+                transport: "none",
             }
         }
     }
@@ -291,7 +344,7 @@ async fn update_single_host(host: &HostStatus, binary_data: &[u8]) -> UpdateResu
     let old_version = host.version.clone();
     eprint!("  {} ({}:{})... ", host.name, host.hostname, host.port);
 
-    // Step A: Connect (direct first, relay fallback if device_id present)
+    // Step A: Connect — try TLS direct first, then relay, then QUIC
     let opts = crate::client::ConnectOptions {
         host: host.hostname.clone(),
         port: host.port,
@@ -299,10 +352,13 @@ async fn update_single_host(host: &HostStatus, binary_data: &[u8]) -> UpdateResu
         password_user: None,
     };
 
-    let mut client = match crate::client::connect(&opts).await {
-        Ok(c) => c,
+    // Try TLS direct
+    match crate::client::connect(&opts).await {
+        Ok(client) => {
+            return push_and_update_tls(host, client, binary_data, old_version).await;
+        }
         Err(direct_err) => {
-            // Try relay fallback if device_id is available
+            // Try relay fallback
             if let Some(ref dev_id) = host.device_id {
                 debug!(
                     "direct connect failed for {}, trying relay via {}",
@@ -319,35 +375,46 @@ async fn update_single_host(host: &HostStatus, binary_data: &[u8]) -> UpdateResu
                     server_name: host.hostname.clone(),
                     port: host.port,
                 };
-                match crate::relay_connect::connect_via_relay(&relay_opts).await {
-                    Ok(c) => c,
-                    Err(relay_err) => {
-                        eprintln!("CONNECT FAILED (direct + relay): {}", relay_err);
-                        return UpdateResult {
-                            name: host.name.clone(),
-                            success: false,
-                            old_version,
-                            new_version: None,
-                            error: Some(format!(
-                                "direct: {}, relay: {}",
-                                direct_err, relay_err
-                            )),
-                        };
+                if let Ok(client) = crate::relay_connect::connect_via_relay(&relay_opts).await {
+                    return push_and_update_tls(host, client, binary_data, old_version).await;
+                }
+            }
+
+            // Try QUIC if configured
+            #[cfg(feature = "quic")]
+            if let Some(qport) = host.quic_port {
+                let addr_str = format!("{}:{}", host.hostname, qport);
+                if let Ok(addr) = addr_str.parse() {
+                    match crate::quic::QuicClient::connect(addr, &host.hostname, None).await {
+                        Ok(quic) => {
+                            return push_and_update_quic(host, quic, binary_data, old_version).await;
+                        }
+                        Err(e) => {
+                            debug!("QUIC connect also failed for {}: {}", host.name, e);
+                        }
                     }
                 }
-            } else {
-                eprintln!("CONNECT FAILED: {}", direct_err);
-                return UpdateResult {
-                    name: host.name.clone(),
-                    success: false,
-                    old_version,
-                    new_version: None,
-                    error: Some(format!("connect: {}", direct_err)),
-                };
             }
-        }
-    };
 
+            eprintln!("CONNECT FAILED: {}", direct_err);
+            return UpdateResult {
+                name: host.name.clone(),
+                success: false,
+                old_version,
+                new_version: None,
+                error: Some(format!("all transports failed: {}", direct_err)),
+            };
+        }
+    }
+}
+
+/// Push binary and send self-update via TLS client (direct or relay).
+async fn push_and_update_tls(
+    host: &HostStatus,
+    mut client: crate::client::TlsClient,
+    binary_data: &[u8],
+    old_version: Option<String>,
+) -> UpdateResult {
     // Push binary to remote temp path
     match crate::sync::push(&mut client, binary_data, REMOTE_UPDATE_PATH).await {
         Ok(r) => {
@@ -365,7 +432,7 @@ async fn update_single_host(host: &HostStatus, binary_data: &[u8]) -> UpdateResu
         }
     }
 
-    // Step B: Send self-update request
+    // Send self-update request
     match crate::commands::self_update(&mut client, REMOTE_UPDATE_PATH).await {
         Ok(_) => {
             eprint!("update sent... ");
@@ -382,13 +449,86 @@ async fn update_single_host(host: &HostStatus, binary_data: &[u8]) -> UpdateResu
         }
     }
 
-    drop(client); // close connection before restart
+    drop(client); // close connection before server restarts
 
-    // Step C: Wait for restart (20s)
+    // Wait for restart (20s)
     eprint!("waiting... ");
     tokio::time::sleep(Duration::from_secs(20)).await;
 
-    // Step D: Verify new version
+    verify_after_update(host, old_version).await
+}
+
+/// Push binary and trigger self-update via QUIC (schtask-based restart).
+#[cfg(feature = "quic")]
+async fn push_and_update_quic(
+    host: &HostStatus,
+    quic: crate::quic::QuicClient,
+    binary_data: &[u8],
+    old_version: Option<String>,
+) -> UpdateResult {
+    // Push binary to remote temp path
+    match quic.push(REMOTE_UPDATE_PATH, binary_data).await {
+        Ok(bytes) => {
+            eprint!("pushed ({} bytes, quic)... ", bytes);
+        }
+        Err(e) => {
+            eprintln!("PUSH FAILED (quic): {}", e);
+            return UpdateResult {
+                name: host.name.clone(),
+                success: false,
+                old_version,
+                new_version: None,
+                error: Some(format!("quic push: {}", e)),
+            };
+        }
+    }
+
+    // Trigger update via scheduled task (service mode)
+    let win_path = REMOTE_UPDATE_PATH.replace('/', "\\");
+    let update_cmd = format!(
+        "schtasks /create /tn rsh-fleet-upd /tr \
+         \"cmd /c net stop rsh & \
+         timeout /t 2 /nobreak >nul & \
+         copy /y {win} C:\\ProgramData\\remote-shell\\rsh.exe & \
+         net start rsh & \
+         del {win} & \
+         schtasks /delete /tn rsh-fleet-upd /f\" \
+         /sc once /st 00:00 /f /ru SYSTEM",
+        win = win_path
+    );
+    if let Err(e) = quic.exec(&update_cmd).await {
+        eprintln!("SCHTASK CREATE FAILED: {}", e);
+        return UpdateResult {
+            name: host.name.clone(),
+            success: false,
+            old_version,
+            new_version: None,
+            error: Some(format!("schtask: {}", e)),
+        };
+    }
+    if let Err(e) = quic.exec("schtasks /run /tn rsh-fleet-upd").await {
+        eprintln!("SCHTASK RUN FAILED: {}", e);
+        return UpdateResult {
+            name: host.name.clone(),
+            success: false,
+            old_version,
+            new_version: None,
+            error: Some(format!("schtask run: {}", e)),
+        };
+    }
+    eprint!("update triggered (quic)... ");
+
+    drop(quic);
+
+    // Wait for restart (25s — schtask has extra scheduling delay)
+    eprint!("waiting... ");
+    tokio::time::sleep(Duration::from_secs(25)).await;
+
+    verify_after_update(host, old_version).await
+}
+
+/// Probe host post-update and return UpdateResult.
+async fn verify_after_update(host: &HostStatus, old_version: Option<String>) -> UpdateResult {
     let verify = probe_host(
         &host.name,
         &host.hostname,
@@ -396,6 +536,7 @@ async fn update_single_host(host: &HostStatus, binary_data: &[u8]) -> UpdateResu
         host.device_id.clone(),
         host.rendezvous_server.clone(),
         host.rendezvous_key.clone(),
+        host.quic_port,
     )
     .await;
 
@@ -476,6 +617,8 @@ mod tests {
             device_id: None,
             rendezvous_server: None,
             rendezvous_key: None,
+            quic_port: None,
+            transport: "tls",
         }
     }
 
@@ -603,6 +746,8 @@ mod tests {
             device_id: Some("118855822".to_string()),
             rendezvous_server: Some("rdv.example.com:21116".to_string()),
             rendezvous_key: Some("testkey".to_string()),
+            quic_port: None,
+            transport: "none",
         };
         assert_eq!(s.device_id.as_deref(), Some("118855822"));
         assert!(s.rendezvous_server.is_some());
