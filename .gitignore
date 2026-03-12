@@ -1,0 +1,13 @@
+# Rust build artifacts
+target/
+
+# Deploy directory (current version only, not tracked)
+deploy/
+
+# Temp artifacts
+.tmp/
+*.tmp
+
+# Generated install packs (released via releases/ with git-lfs)
+rsh-*-windows-install.exe
+rsh-*-linux-install.sh

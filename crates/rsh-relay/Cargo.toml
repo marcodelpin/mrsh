@@ -1,0 +1,24 @@
+[package]
+name = "rsh-relay"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+description = "Clean-room relay and rendezvous client — wire-compatible with RustDesk hbbs/hbbr"
+
+[dependencies]
+rsh-core.workspace = true
+prost.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+rand.workspace = true
+sha2.workspace = true
+hex = "0.4"
+
+[build-dependencies]
+prost-build.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
