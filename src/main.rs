@@ -565,6 +565,30 @@ async fn async_main(cli: Cli) -> Result<()> {
                     println!("{}{} {:>10} {} {}", kind, f.mode, f.size, f.mod_time, f.name);
                 }
             }
+            "tunnel" => {
+                if args.len() < 3 {
+                    bail!("tunnel requires: <local_bind> <remote_host:port>");
+                }
+                let (local_bind, remote_target) =
+                    rsh_client::tunnel::parse_tunnel_spec(&args[1], &args[2])?;
+                eprintln!(
+                    "tunnel (QUIC): {} → {} via {}",
+                    local_bind, remote_target, resolved_host
+                );
+                let listener = tokio::net::TcpListener::bind(&local_bind)
+                    .await
+                    .with_context(|| format!("bind {}", local_bind))?;
+                eprintln!("listening on {}", listener.local_addr()?);
+                let (local_stream, peer) = listener.accept().await?;
+                local_stream.set_nodelay(true).ok();
+                eprintln!("tunnel: local connection from {}", peer);
+                let (mut quic_send, mut quic_recv) = quic.open_tunnel(&remote_target).await?;
+                let (mut tcp_read, mut tcp_write) = local_stream.into_split();
+                tokio::select! {
+                    _ = tokio::io::copy(&mut quic_recv, &mut tcp_write) => {}
+                    _ = tokio::io::copy(&mut tcp_read, &mut quic_send) => {}
+                }
+            }
             _ => bail!("command {:?} is not supported over QUIC (omit --quic)", cmd),
         }
         quic.close();
