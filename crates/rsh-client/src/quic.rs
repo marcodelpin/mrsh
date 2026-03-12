@@ -204,6 +204,50 @@ impl QuicClient {
         Ok(files)
     }
 
+    /// Open an interactive shell channel.
+    ///
+    /// Returns the raw send/recv streams after the server confirms `OK\n`.
+    /// The caller is responsible for the wire-framed relay loop.
+    ///
+    /// Protocol: `shell[\0{COLSxROWS}]\n` → `OK\n` then bidirectional frames.
+    pub async fn open_shell(
+        &self,
+        size_str: &str,
+    ) -> Result<(quinn::SendStream, quinn::RecvStream)> {
+        let (mut send, recv) = self
+            .conn
+            .open_bi()
+            .await
+            .context("open shell stream")?;
+
+        let header = if size_str.is_empty() {
+            "shell\n".to_string()
+        } else {
+            format!("shell\0{}\n", size_str)
+        };
+        send.write_all(header.as_bytes())
+            .await
+            .context("write shell header")?;
+
+        let mut reader = BufReader::new(recv);
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .await
+            .context("read shell OK")?;
+
+        if line.starts_with("ERROR:") {
+            bail!("remote shell: {}", line.trim());
+        }
+        if !line.starts_with("OK") {
+            bail!("unexpected shell response: {}", line.trim());
+        }
+
+        // Return the raw streams; the RecvStream was consumed by BufReader,
+        // so we recover it via IntoInner.
+        Ok((send, reader.into_inner()))
+    }
+
     /// Close the connection gracefully.
     pub fn close(&self) {
         self.conn.close(quinn::VarInt::from_u32(0), b"done");

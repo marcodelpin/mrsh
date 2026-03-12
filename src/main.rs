@@ -619,6 +619,9 @@ async fn async_main(cli: Cli) -> Result<()> {
                     _ = tokio::io::copy(&mut tcp_read, &mut quic_send) => {}
                 }
             }
+            "shell" => {
+                rsh_client::shell::run_quic_shell(&quic).await?;
+            }
             _ => bail!("command {:?} is not supported over QUIC (omit --quic)", cmd),
         }
         quic.close();

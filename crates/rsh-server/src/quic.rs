@@ -15,10 +15,11 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpStream, UdpSocket};
 use tracing::{debug, info, warn};
 
-use rsh_core::{auth, protocol};
+use rsh_core::{auth, protocol, wire};
 
 use crate::exec;
 use crate::handler::ServerContext;
+use crate::shell;
 use crate::sync;
 use crate::tunnel;
 
@@ -29,6 +30,7 @@ const CHAN_TYPE_EXEC: &str = "exec";
 const CHAN_TYPE_PUSH: &str = "push";
 const CHAN_TYPE_PULL: &str = "pull";
 const CHAN_TYPE_LS: &str = "ls";
+const CHAN_TYPE_SHELL: &str = "shell";
 
 /// Start the QUIC listener on the same port as TLS (UDP).
 ///
@@ -351,6 +353,13 @@ async fn handle_quic_stream(
                 return Ok(());
             }
             handle_quic_ls(&mut send, &mut reader, target).await
+        }
+        CHAN_TYPE_SHELL => {
+            if !perms.allow_shell {
+                send.write_all(b"ERROR: shell not permitted for this key\n").await.ok();
+                return Ok(());
+            }
+            handle_quic_shell(&mut send, &mut reader, target).await
         }
         _ => {
             send.write_all(b"ERROR: unknown channel type\n").await.ok();
@@ -701,6 +710,354 @@ async fn handle_quic_ls(
 
     send_quic_json(send, &files).await?;
     info!("[QUIC] ls: {} entries from {}", files.len(), path);
+    Ok(())
+}
+
+/// Interactive shell over QUIC stream (Linux PTY).
+/// Channel header: `shell[\0{COLSxROWS}]\n`
+/// Protocol:
+///   Server → Client: `OK\n` (or `ERROR: ...\n`)
+///   Bidirectional: wire-framed chunks (same as TLS shell)
+///   Resize: 0x01 + cols(2BE) + rows(2BE) from client
+///   EOF: empty frame from either side
+#[cfg(not(target_os = "windows"))]
+async fn handle_quic_shell(
+    send: &mut quinn::SendStream,
+    reader: &mut BufReader<quinn::RecvStream>,
+    target: &str,
+) -> Result<()> {
+    use std::os::unix::io::FromRawFd;
+
+    let size_str = if target.is_empty() { "80x24" } else { target };
+    let (cols, rows) = shell::parse_size(size_str);
+    info!("[QUIC] shell: {}x{}", cols, rows);
+
+    // Create PTY pair
+    let mut master_fd: libc::c_int = 0;
+    let mut slave_fd: libc::c_int = 0;
+    let ws = libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+
+    if unsafe {
+        libc::openpty(
+            &mut master_fd,
+            &mut slave_fd,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &ws as *const libc::winsize as *mut libc::winsize,
+        )
+    } != 0
+    {
+        let msg = format!(
+            "ERROR: openpty: {}\n",
+            std::io::Error::last_os_error()
+        );
+        send.write_all(msg.as_bytes()).await.ok();
+        return Ok(());
+    }
+
+    let shell_bin = if std::path::Path::new("/bin/bash").exists() {
+        "/bin/bash"
+    } else {
+        "/bin/sh"
+    };
+
+    let saved_master = master_fd;
+    let saved_slave = slave_fd;
+
+    let mut cmd = tokio::process::Command::new(shell_bin);
+    cmd.env("TERM", "xterm-256color");
+    cmd.kill_on_drop(true);
+    unsafe {
+        cmd.pre_exec(move || {
+            libc::close(saved_master);
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::ioctl(saved_slave, libc::TIOCSCTTY, 0 as libc::c_int) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            libc::dup2(saved_slave, 0);
+            libc::dup2(saved_slave, 1);
+            libc::dup2(saved_slave, 2);
+            if saved_slave > 2 {
+                libc::close(saved_slave);
+            }
+            Ok(())
+        });
+    }
+
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            unsafe {
+                libc::close(master_fd);
+                libc::close(slave_fd);
+            }
+            let msg = format!("ERROR: spawn: {}\n", e);
+            send.write_all(msg.as_bytes()).await.ok();
+            return Ok(());
+        }
+    };
+    let child_pid = child.id().unwrap_or(0) as libc::pid_t;
+    let _child = child;
+
+    // Close slave in parent (child holds its copy)
+    unsafe {
+        libc::close(slave_fd);
+    }
+
+    // Dup master for separate read and write ownership
+    let master_write_fd = unsafe { libc::dup(master_fd) };
+    if master_write_fd < 0 {
+        unsafe {
+            libc::close(master_fd);
+        }
+        anyhow::bail!("dup(master): {}", std::io::Error::last_os_error());
+    }
+
+    // Signal OK to client before entering relay loop
+    send.write_all(b"OK\n").await.context("send OK")?;
+
+    // Spawn blocking reader thread: PTY master → mpsc channel
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
+    let reader_task = tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let mut f = unsafe { std::fs::File::from_raw_fd(master_fd) };
+        let mut buf = [0u8; 32768];
+        loop {
+            match f.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx.blocking_send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    if e.raw_os_error() == Some(libc::EIO) {
+                        break; // slave closed (child exited) — normal
+                    }
+                    debug!("[QUIC] shell: PTY read: {}", e);
+                    break;
+                }
+            }
+        }
+    });
+
+    let mut master_write = unsafe { std::fs::File::from_raw_fd(master_write_fd) };
+
+    // Bidirectional relay loop
+    loop {
+        tokio::select! {
+            // Client → PTY
+            result = wire::recv_message(reader) => {
+                match result {
+                    Ok(data) if data.is_empty() => {
+                        debug!("[QUIC] shell: client EOF");
+                        break;
+                    }
+                    Ok(data) => {
+                        if let Some((c, r)) = shell::parse_resize(&data) {
+                            let new_ws = libc::winsize {
+                                ws_row: r,
+                                ws_col: c,
+                                ws_xpixel: 0,
+                                ws_ypixel: 0,
+                            };
+                            unsafe {
+                                libc::ioctl(master_write_fd, libc::TIOCSWINSZ, &new_ws);
+                                if child_pid > 0 {
+                                    libc::kill(-child_pid, libc::SIGWINCH);
+                                }
+                            }
+                            continue;
+                        }
+                        use std::io::Write;
+                        if master_write.write_all(&data).is_err()
+                            || master_write.flush().is_err()
+                        {
+                            debug!("[QUIC] shell: PTY write failed");
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        debug!("[QUIC] shell: client disconnected");
+                        break;
+                    }
+                }
+            }
+            // PTY → Client
+            msg = rx.recv() => {
+                match msg {
+                    Some(data) => {
+                        if wire::send_message(send, &data).await.is_err() {
+                            debug!("[QUIC] shell: send failed");
+                            break;
+                        }
+                    }
+                    None => {
+                        debug!("[QUIC] shell: process exited");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    drop(master_write);
+    reader_task.abort();
+    wire::send_message(send, &[]).await.ok();
+    info!("[QUIC] shell: session ended");
+    Ok(())
+}
+
+/// Interactive shell over QUIC stream (Windows ConPTY).
+#[cfg(target_os = "windows")]
+async fn handle_quic_shell(
+    send: &mut quinn::SendStream,
+    reader: &mut BufReader<quinn::RecvStream>,
+    target: &str,
+) -> Result<()> {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::System::Console::{
+        COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole,
+    };
+    use windows::Win32::System::Pipes::CreatePipe;
+    use windows::Win32::System::Threading::{
+        CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
+        InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
+        STARTUPINFOEXW, UpdateProcThreadAttribute,
+    };
+
+    let size_str = if target.is_empty() { "80x24" } else { target };
+    let (cols, rows) = shell::parse_size(size_str);
+    info!("[QUIC] shell (ConPTY): {}x{}", cols, rows);
+
+    let (pty_in_write, pty_out_read, hpc, proc_raw, thread_raw) = unsafe {
+        let mut pty_in_read = HANDLE::default();
+        let mut pty_in_write = HANDLE::default();
+        let mut pty_out_read = HANDLE::default();
+        let mut pty_out_write = HANDLE::default();
+
+        CreatePipe(&mut pty_in_read, &mut pty_in_write, None, 0).context("CreatePipe input")?;
+        CreatePipe(&mut pty_out_read, &mut pty_out_write, None, 0)
+            .context("CreatePipe output")?;
+
+        let size = COORD { X: cols as i16, Y: rows as i16 };
+        let hpc = CreatePseudoConsole(size, pty_in_read, pty_out_write, 0)
+            .context("CreatePseudoConsole")?;
+
+        let _ = CloseHandle(pty_in_read);
+        let _ = CloseHandle(pty_out_write);
+
+        let mut attr_size: usize = 0;
+        let _ = InitializeProcThreadAttributeList(None, 1, None, &mut attr_size);
+        let mut attr_buf = vec![0u8; attr_size];
+        let attr_list = LPPROC_THREAD_ATTRIBUTE_LIST(attr_buf.as_mut_ptr() as _);
+        InitializeProcThreadAttributeList(Some(attr_list), 1, None, &mut attr_size)
+            .context("InitializeProcThreadAttributeList")?;
+
+        const PSEUDOCONSOLE_ATTR: usize = 0x00020016;
+        UpdateProcThreadAttribute(
+            attr_list, 0, PSEUDOCONSOLE_ATTR,
+            Some(&hpc as *const HPCON as *const std::ffi::c_void),
+            std::mem::size_of::<HPCON>(), None, None,
+        )
+        .context("UpdateProcThreadAttribute")?;
+
+        let mut si = STARTUPINFOEXW::default();
+        si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+        si.lpAttributeList = attr_list;
+        let mut pi = PROCESS_INFORMATION::default();
+        let mut cmd: Vec<u16> = "powershell.exe\0".encode_utf16().collect();
+
+        CreateProcessW(
+            windows::core::PCWSTR::null(),
+            Some(windows::core::PWSTR(cmd.as_mut_ptr())),
+            None, None, false, EXTENDED_STARTUPINFO_PRESENT, None,
+            windows::core::PCWSTR::null(), &si.StartupInfo, &mut pi,
+        )
+        .context("CreateProcessW")?;
+
+        DeleteProcThreadAttributeList(attr_list);
+        let proc_raw = pi.hProcess.0 as usize;
+        let thread_raw = pi.hThread.0 as usize;
+        (pty_in_write, pty_out_read, hpc, proc_raw, thread_raw)
+    };
+
+    use std::os::windows::io::FromRawHandle;
+    let out_file = unsafe { std::fs::File::from_raw_handle(pty_out_read.0) };
+    let mut in_file = unsafe { std::fs::File::from_raw_handle(pty_in_write.0) };
+
+    send.write_all(b"OK\n").await.context("send OK")?;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
+    let reader_task = tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let mut f = out_file;
+        let mut buf = [0u8; 32768];
+        loop {
+            match f.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx.blocking_send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    loop {
+        tokio::select! {
+            result = wire::recv_message(reader) => {
+                match result {
+                    Ok(data) if data.is_empty() => break,
+                    Ok(data) => {
+                        if let Some((c, r)) = shell::parse_resize(&data) {
+                            unsafe {
+                                let sz = COORD { X: c as i16, Y: r as i16 };
+                                let _ = ResizePseudoConsole(hpc, sz);
+                            }
+                            continue;
+                        }
+                        use std::io::Write;
+                        if in_file.write_all(&data).is_err() || in_file.flush().is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            msg = rx.recv() => {
+                match msg {
+                    Some(data) => {
+                        if wire::send_message(send, &data).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+
+    unsafe {
+        ClosePseudoConsole(hpc);
+    }
+    drop(in_file);
+    reader_task.abort();
+    unsafe {
+        let _ = CloseHandle(HANDLE(proc_raw as *mut std::ffi::c_void));
+        let _ = CloseHandle(HANDLE(thread_raw as *mut std::ffi::c_void));
+    }
+    wire::send_message(send, &[]).await.ok();
+    info!("[QUIC] shell: ConPTY session ended");
     Ok(())
 }
 
@@ -1469,6 +1826,107 @@ mod tests {
         assert!(
             response.contains("ERROR"),
             "expected error for missing dir, got: {:?}",
+            response
+        );
+
+        conn.close(quinn::VarInt::from_u32(0), b"done");
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test]
+    #[cfg(not(target_os = "windows"))]
+    async fn quic_shell_handshake() {
+        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        let ctx = make_test_context(&signing_key);
+        let (server_ep, client_ep, server_addr) = make_quic_endpoint_pair().unwrap();
+
+        let ctx_clone = ctx.clone();
+        let server_handle = tokio::spawn(async move {
+            let incoming = server_ep.accept().await.unwrap();
+            let conn = incoming.await.unwrap();
+            handle_quic_connection(conn, ctx_clone).await
+        });
+
+        let conn = client_ep
+            .connect(server_addr, "localhost")
+            .unwrap()
+            .await
+            .unwrap();
+
+        let result = client_authenticate(&conn, &signing_key).await.unwrap();
+        assert!(result.success);
+
+        // Open shell channel: "shell\0{COLSxROWS}\n"
+        let (mut send, recv) = conn.open_bi().await.unwrap();
+        send.write_all(b"shell\080x24\n").await.unwrap();
+
+        // Server should respond with "OK\n"
+        let mut reader = BufReader::new(recv);
+        let mut ok_line = String::new();
+        reader.read_line(&mut ok_line).await.unwrap();
+        assert_eq!(ok_line.trim(), "OK", "expected OK, got: {:?}", ok_line);
+
+        // Disconnect — server relay loop should exit cleanly
+        conn.close(quinn::VarInt::from_u32(0), b"done");
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test]
+    async fn quic_shell_permission_denied() {
+        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+
+        // Create context with shell disabled
+        let pub_bytes = signing_key.verifying_key().to_bytes();
+        let mut perms = auth::KeyPermissions::default();
+        perms.allow_shell = false;
+        let ak = auth::AuthorizedKey {
+            key_type: "ssh-ed25519".to_string(),
+            key_data: pub_bytes.to_vec(),
+            comment: Some("test@host".to_string()),
+            permissions: perms,
+        };
+        let ctx = Arc::new(ServerContext {
+            authorized_keys: vec![ak],
+            revoked_keys: std::collections::HashSet::new(),
+            server_version: "0.1.0-test".to_string(),
+            banner: None,
+            caps: vec![],
+            session_store: session::SessionStore::new(),
+            rate_limiter: ratelimit::AuthRateLimiter::new(),
+            allowed_tunnels: vec![],
+            totp_secrets: vec![],
+            totp_recovery_path: None,
+        });
+
+        let (server_ep, client_ep, server_addr) = make_quic_endpoint_pair().unwrap();
+
+        let ctx_clone = ctx.clone();
+        let server_handle = tokio::spawn(async move {
+            let incoming = server_ep.accept().await.unwrap();
+            let conn = incoming.await.unwrap();
+            handle_quic_connection(conn, ctx_clone).await
+        });
+
+        let conn = client_ep
+            .connect(server_addr, "localhost")
+            .unwrap()
+            .await
+            .unwrap();
+
+        let result = client_authenticate(&conn, &signing_key).await.unwrap();
+        assert!(result.success);
+
+        // Try shell — should be denied
+        let (mut send, recv) = conn.open_bi().await.unwrap();
+        send.write_all(b"shell\n").await.unwrap();
+        send.finish().unwrap();
+
+        let mut response = String::new();
+        let mut reader = BufReader::new(recv);
+        reader.read_to_string(&mut response).await.unwrap();
+        assert!(
+            response.contains("ERROR") && response.contains("not permitted"),
+            "expected permission denied, got: {:?}",
             response
         );
 

@@ -279,6 +279,109 @@ pub async fn run_attach<S: AsyncRead + AsyncWrite + Unpin + Send>(
     }
 }
 
+// ── QUIC interactive shell ──────────────────────────────────
+
+/// Run an interactive shell session over a QUIC connection.
+///
+/// Puts the terminal into raw mode, relays I/O between stdin/stdout and
+/// the server's ConPTY, handles resize and tilde escapes.
+#[cfg(feature = "quic")]
+pub async fn run_quic_shell(quic: &crate::quic::QuicClient) -> Result<()> {
+    use tokio::io::BufReader;
+
+    let (cols, rows) = terminal::size().unwrap_or((80, 24));
+    let size_str = format!("{}x{}", cols, rows);
+
+    let (mut send, recv) = quic.open_shell(&size_str).await?;
+    let mut reader = BufReader::new(recv);
+
+    terminal::enable_raw_mode().context("enable raw terminal mode")?;
+    let result = quic_relay_loop(&mut send, &mut reader).await;
+    terminal::disable_raw_mode().ok();
+
+    match result {
+        Ok(ShellExit::Disconnect) => {
+            eprintln!("\r\nConnection closed.\r");
+            Ok(())
+        }
+        Ok(ShellExit::ServerEof) => {
+            eprintln!("\r\nShell session ended.\r");
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("\r\nShell error: {}\r", e);
+            Err(e)
+        }
+    }
+}
+
+#[cfg(feature = "quic")]
+async fn quic_relay_loop(
+    send: &mut quinn::SendStream,
+    reader: &mut tokio::io::BufReader<quinn::RecvStream>,
+) -> Result<ShellExit> {
+    let mut stdin_buf = vec![0u8; 4096];
+    let mut after_newline = true;
+    let mut in_escape = false;
+
+    let mut stdin = tokio::io::stdin();
+    let mut stdout = tokio::io::stdout();
+
+    loop {
+        tokio::select! {
+            result = stdin.read(&mut stdin_buf) => {
+                match result {
+                    Ok(0) | Err(_) => {
+                        wire::send_message(send, &[]).await.ok();
+                        return Ok(ShellExit::Disconnect);
+                    }
+                    Ok(n) => {
+                        let input = &stdin_buf[..n];
+                        let (out, action) = process_escapes(
+                            input,
+                            &mut after_newline,
+                            &mut in_escape,
+                        );
+                        match action {
+                            EscapeAction::Continue => {
+                                if !out.is_empty() {
+                                    wire::send_message(send, &out)
+                                        .await
+                                        .context("send to server")?;
+                                }
+                            }
+                            EscapeAction::Disconnect => {
+                                wire::send_message(send, &[]).await.ok();
+                                return Ok(ShellExit::Disconnect);
+                            }
+                            EscapeAction::Help => {
+                                let help = "\r\nSupported escape sequences:\r\n  ~.  - terminate connection\r\n  ~~  - send the escape character (~)\r\n  ~?  - this help\r\n";
+                                stdout.write_all(help.as_bytes()).await.ok();
+                                stdout.flush().await.ok();
+                                if !out.is_empty() {
+                                    wire::send_message(send, &out)
+                                        .await
+                                        .context("send to server")?;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            result = wire::recv_message(reader) => {
+                match result {
+                    Ok(data) if data.is_empty() => return Ok(ShellExit::ServerEof),
+                    Ok(data) => {
+                        stdout.write_all(&data).await.context("write stdout")?;
+                        stdout.flush().await.ok();
+                    }
+                    Err(_) => return Ok(ShellExit::ServerEof),
+                }
+            }
+        }
+    }
+}
+
 // ── Wake on LAN ──────────────────────────────────────────────
 
 /// Send a Wake-on-LAN magic packet.
