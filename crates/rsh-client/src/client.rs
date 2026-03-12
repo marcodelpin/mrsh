@@ -59,6 +59,65 @@ pub async fn connect(opts: &ConnectOptions) -> Result<TlsClient> {
     }
 }
 
+/// Ports to try when no port is specified (-p omitted, no config port).
+pub const AUTO_TRY_PORTS: &[u16] = &[8822, 9822, 22];
+
+/// Short timeout per port during auto-try (seconds).
+const AUTO_TRY_TIMEOUT_SECS: u64 = 3;
+
+/// Connect with auto-try: attempt multiple ports sequentially with short timeouts.
+/// Returns the first successful connection. On failure, returns the error from the
+/// primary port (8822) for a clear error message.
+pub async fn connect_auto_try(opts: &ConnectOptions) -> Result<(TlsClient, u16)> {
+    let mut primary_error = None;
+
+    for &port in AUTO_TRY_PORTS {
+        debug!("auto-try: attempting {}:{}", opts.host, port);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(AUTO_TRY_TIMEOUT_SECS),
+            async {
+                let stream = tcp_connect(&opts.host, port).await?;
+                let tls_stream = tls_wrap(stream, &opts.host).await?;
+                if let Some(ref user) = opts.password_user {
+                    auth_password(tls_stream, user, &opts.host).await
+                } else {
+                    auth_client(tls_stream, &opts.key_path).await
+                }
+            },
+        )
+        .await;
+
+        match result {
+            Ok(Ok(client)) => {
+                if port != AUTO_TRY_PORTS[0] {
+                    info!("connected on port {} (auto-try)", port);
+                }
+                return Ok((client, port));
+            }
+            Ok(Err(e)) => {
+                debug!("auto-try port {} failed: {}", port, e);
+                if primary_error.is_none() {
+                    primary_error = Some(e);
+                }
+            }
+            Err(_) => {
+                debug!("auto-try port {} timed out", port);
+                if primary_error.is_none() {
+                    primary_error = Some(anyhow::anyhow!(
+                        "connection to {}:{} timed out",
+                        opts.host,
+                        port
+                    ));
+                }
+            }
+        }
+    }
+
+    Err(primary_error.unwrap_or_else(|| {
+        anyhow::anyhow!("failed to connect to {} on any port", opts.host)
+    }))
+}
+
 /// Connect and authenticate over an existing TCP stream (e.g. from relay).
 pub async fn connect_over_stream(
     stream: TcpStream,

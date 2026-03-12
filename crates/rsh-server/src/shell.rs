@@ -267,7 +267,6 @@ where
         STARTUPINFOEXW, UpdateProcThreadAttribute,
     };
 
-    let _ = env_vars; // TODO: pass environment to child process
     let (cols, rows) = parse_size(size_str);
     info!("ConPTY shell session: {}x{}", cols, rows);
 
@@ -316,6 +315,26 @@ where
         )
         .context("UpdateProcThreadAttribute")?;
 
+        // --- Build environment block (inherit + extras) ---
+        let env_block = if env_vars.is_empty() {
+            None
+        } else {
+            let mut env_map: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+            for e in env_vars {
+                if let Some((k, v)) = e.split_once('=') {
+                    env_map.insert(k.to_string(), v.to_string());
+                }
+            }
+            let mut block: Vec<u16> = Vec::new();
+            for (k, v) in &env_map {
+                let entry = format!("{}={}", k, v);
+                block.extend(entry.encode_utf16());
+                block.push(0);
+            }
+            block.push(0); // double-null terminator
+            Some(block)
+        };
+
         // --- Create child process (powershell) ---
         let mut si = STARTUPINFOEXW::default();
         si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
@@ -324,14 +343,22 @@ where
         let mut pi = PROCESS_INFORMATION::default();
         let mut cmd: Vec<u16> = "powershell.exe\0".encode_utf16().collect();
 
+        let env_ptr = env_block.as_ref().map(|b| b.as_ptr() as *const std::ffi::c_void);
+        let create_flags = EXTENDED_STARTUPINFO_PRESENT
+            | if env_ptr.is_some() {
+                windows::Win32::System::Threading::CREATE_UNICODE_ENVIRONMENT
+            } else {
+                windows::Win32::System::Threading::PROCESS_CREATION_FLAGS(0)
+            };
+
         CreateProcessW(
             windows::core::PCWSTR::null(),
             Some(windows::core::PWSTR(cmd.as_mut_ptr())),
             None,
             None,
             false,
-            EXTENDED_STARTUPINFO_PRESENT,
-            None,
+            create_flags,
+            env_ptr,
             windows::core::PCWSTR::null(),
             &si.StartupInfo,
             &mut pi,

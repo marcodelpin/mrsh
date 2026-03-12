@@ -11,3 +11,7 @@ deploy/
 # Generated install packs (released via releases/ with git-lfs)
 rsh-*-windows-install.exe
 rsh-*-linux-install.sh
+
+# Dolt database files (added by bd init)
+.dolt/
+*.db

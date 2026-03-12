@@ -35,9 +35,9 @@ struct Cli {
     #[arg(long)]
     help: bool,
 
-    /// Remote port
-    #[arg(short, long, default_value_t = 8822)]
-    port: u16,
+    /// Remote port (omit for auto-try: 8822 → 9822 → 22)
+    #[arg(short, long)]
+    port: Option<u16>,
 
     /// SSH key file
     #[arg(short = 'i', long)]
@@ -246,7 +246,7 @@ fn main() -> Result<()> {
     }
     if cli.console {
         let rt = tokio::runtime::Runtime::new()?;
-        return rt.block_on(run_server_mode(cli.port, false));
+        return rt.block_on(run_server_mode(cli.port.unwrap_or(8822), false));
     }
 
     // ── Explicit tray mode (Windows) ─────────────────────────
@@ -261,7 +261,7 @@ fn main() -> Result<()> {
     // ── Linux daemon mode ────────────────────────────────────
     #[cfg(not(target_os = "windows"))]
     if cli.daemon {
-        let port = cli.port;
+        let port = cli.port.unwrap_or(8822);
         rsh_server::service::run_as_service(move |cancel| {
             let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
             rt.block_on(async {
@@ -287,7 +287,7 @@ fn main() -> Result<()> {
         if cli.host.is_none() && !is_local_cmd {
             // Try service mode — service_dispatcher::start() blocks if SCM launched us,
             // returns error immediately if we're not a service.
-            let port = cli.port;
+            let port = cli.port.unwrap_or(8822);
             let result = rsh_server::service::run_as_service(move |cancel| {
                 let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
                 rt.block_on(async {
@@ -447,7 +447,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             eprintln!("error: -h <host> required for --mux-stop");
             std::process::exit(1);
         });
-        return rsh_client::mux::stop_master(host, cli.port).await;
+        return rsh_client::mux::stop_master(host, cli.port.unwrap_or(8822)).await;
     }
 
     // ── Server mode: no -h, no local command, on Windows ────
@@ -467,14 +467,19 @@ async fn async_main(cli: Cli) -> Result<()> {
     // Resolve from config
     let config = rsh_core::config::Config::load();
     let host_config = config.find_host(host);
-    let (resolved_host, resolved_port) = if let Some(hc) = host_config {
+    let port_explicit = cli.port.is_some(); // user passed -p explicitly
+    let (resolved_host, mut resolved_port, port_from_config) = if let Some(hc) = host_config {
+        let cfg_port = hc.port;
         (
             hc.hostname.as_deref().unwrap_or(host).to_string(),
-            if cli.port != 8822 { cli.port } else { hc.port },
+            cli.port.unwrap_or(cfg_port),
+            cli.port.is_none() && cfg_port != 8822, // config specified non-default port
         )
     } else {
-        (host.to_string(), cli.port)
+        (host.to_string(), cli.port.unwrap_or(8822), false)
     };
+    // Auto-try ports when neither -p nor config specified a port
+    let auto_try_ports = !port_explicit && !port_from_config;
 
     // ── Auto-mux: try UDS before opening new connection ──────
     if !cli.no_mux && !cli.master {
@@ -716,8 +721,19 @@ async fn async_main(cli: Cli) -> Result<()> {
             port: resolved_port,
         };
         rsh_client::relay_connect::connect_via_relay(&relay_opts).await?
+    } else if auto_try_ports {
+        // Auto-try ports: try 8822 → 9822 → 22
+        let opts = ConnectOptions {
+            host: resolved_host.clone(),
+            port: resolved_port,
+            key_path: cli.key.clone(),
+            password_user: cli.user.clone(),
+        };
+        let (client, actual_port) = rsh_client::client::connect_auto_try(&opts).await?;
+        resolved_port = actual_port;
+        client
     } else {
-        // Direct connection
+        // Direct connection to explicit port
         let opts = ConnectOptions {
             host: resolved_host.clone(),
             port: resolved_port,
