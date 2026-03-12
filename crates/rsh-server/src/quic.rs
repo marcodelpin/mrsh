@@ -28,6 +28,7 @@ const CHAN_TYPE_UDP_TUNNEL: &str = "udp-tunnel";
 const CHAN_TYPE_EXEC: &str = "exec";
 const CHAN_TYPE_PUSH: &str = "push";
 const CHAN_TYPE_PULL: &str = "pull";
+const CHAN_TYPE_LS: &str = "ls";
 
 /// Start the QUIC listener on the same port as TLS (UDP).
 ///
@@ -344,6 +345,13 @@ async fn handle_quic_stream(
             }
             handle_quic_pull(&mut send, &mut reader, target).await
         }
+        CHAN_TYPE_LS => {
+            if !perms.allow_pull {
+                send.write_all(b"ERROR: ls not permitted for this key\n").await.ok();
+                return Ok(());
+            }
+            handle_quic_ls(&mut send, &mut reader, target).await
+        }
         _ => {
             send.write_all(b"ERROR: unknown channel type\n").await.ok();
             Ok(())
@@ -622,6 +630,77 @@ async fn handle_quic_pull(
     send.write_all(&data).await.context("send data")?;
 
     info!("[QUIC] pull: sent {} bytes from {}", size, target);
+    Ok(())
+}
+
+/// List a remote directory over QUIC.
+///
+/// Header: `ls\0<path>\n`. Response: newline-delimited JSON array of FileInfo,
+/// or `ERROR: <msg>\n`.
+async fn handle_quic_ls(
+    send: &mut quinn::SendStream,
+    _reader: &mut BufReader<quinn::RecvStream>,
+    target: &str,
+) -> Result<()> {
+    use rsh_core::protocol::FileInfo;
+
+    let path = if target.is_empty() { "." } else { target };
+
+    // Validate path
+    if let Err(e) = sync::sanitize_path(path) {
+        let msg = format!("ERROR: {}\n", e);
+        send.write_all(msg.as_bytes()).await.ok();
+        return Ok(());
+    }
+
+    let mut entries = match tokio::fs::read_dir(path).await {
+        Ok(e) => e,
+        Err(e) => {
+            let msg = format!("ERROR: {}\n", e);
+            send.write_all(msg.as_bytes()).await.ok();
+            return Ok(());
+        }
+    };
+
+    let mut files: Vec<FileInfo> = Vec::new();
+    loop {
+        let entry = match entries.next_entry().await {
+            Ok(Some(e)) => e,
+            Ok(None) => break,
+            Err(e) => {
+                warn!("[QUIC] ls: read_dir entry error: {}", e);
+                continue;
+            }
+        };
+        let meta = match entry.metadata().await {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let mod_time = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs().to_string())
+            .unwrap_or_default();
+        let name = entry.file_name().to_string_lossy().to_string();
+        #[cfg(unix)]
+        let mode = {
+            use std::os::unix::fs::PermissionsExt;
+            format!("{:o}", meta.permissions().mode() & 0o777)
+        };
+        #[cfg(not(unix))]
+        let mode = String::from("---");
+        files.push(FileInfo {
+            name,
+            size: meta.len() as i64,
+            mode,
+            mod_time,
+            is_dir: meta.is_dir(),
+        });
+    }
+
+    send_quic_json(send, &files).await?;
+    info!("[QUIC] ls: {} entries from {}", files.len(), path);
     Ok(())
 }
 
@@ -1315,6 +1394,83 @@ mod tests {
         // Verify empty file
         let content = tokio::fs::read(&file_path).await.unwrap();
         assert!(content.is_empty());
+
+        conn.close(quinn::VarInt::from_u32(0), b"done");
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test]
+    async fn quic_ls_roundtrip() {
+        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        let ctx = make_test_context(&signing_key);
+        let (server_ep, client_ep, server_addr) = make_quic_endpoint_pair().unwrap();
+
+        let ctx_clone = ctx.clone();
+        let server_handle = tokio::spawn(async move {
+            let incoming = server_ep.accept().await.unwrap();
+            let conn = incoming.await.unwrap();
+            handle_quic_connection(conn, ctx_clone).await
+        });
+
+        let conn = client_ep.connect(server_addr, "localhost").unwrap().await.unwrap();
+        let result = client_authenticate(&conn, &signing_key).await.unwrap();
+        assert!(result.success);
+
+        // Create a temp dir with a known file
+        let tmp_dir = tempfile::tempdir().unwrap();
+        std::fs::write(tmp_dir.path().join("hello.txt"), b"hi").unwrap();
+
+        // List the temp dir
+        let (mut send, recv) = conn.open_bi().await.unwrap();
+        let header = format!("ls\0{}\n", tmp_dir.path().to_str().unwrap());
+        send.write_all(header.as_bytes()).await.unwrap();
+        send.finish().unwrap();
+
+        let mut reader = BufReader::new(recv);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+
+        // Should be valid JSON array containing "hello.txt"
+        let files: Vec<rsh_core::protocol::FileInfo> = serde_json::from_str(&line)
+            .unwrap_or_else(|_| panic!("expected JSON array, got: {:?}", line));
+        assert!(
+            files.iter().any(|f| f.name == "hello.txt"),
+            "hello.txt not found in listing"
+        );
+
+        conn.close(quinn::VarInt::from_u32(0), b"done");
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test]
+    async fn quic_ls_nonexistent_dir() {
+        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        let ctx = make_test_context(&signing_key);
+        let (server_ep, client_ep, server_addr) = make_quic_endpoint_pair().unwrap();
+
+        let ctx_clone = ctx.clone();
+        let server_handle = tokio::spawn(async move {
+            let incoming = server_ep.accept().await.unwrap();
+            let conn = incoming.await.unwrap();
+            handle_quic_connection(conn, ctx_clone).await
+        });
+
+        let conn = client_ep.connect(server_addr, "localhost").unwrap().await.unwrap();
+        let result = client_authenticate(&conn, &signing_key).await.unwrap();
+        assert!(result.success);
+
+        let (mut send, recv) = conn.open_bi().await.unwrap();
+        send.write_all(b"ls\0/tmp/nonexistent_quic_ls_test_xyz\n").await.unwrap();
+        send.finish().unwrap();
+
+        let mut response = String::new();
+        let mut reader = BufReader::new(recv);
+        reader.read_to_string(&mut response).await.unwrap();
+        assert!(
+            response.contains("ERROR"),
+            "expected error for missing dir, got: {:?}",
+            response
+        );
 
         conn.close(quinn::VarInt::from_u32(0), b"done");
         let _ = server_handle.await;

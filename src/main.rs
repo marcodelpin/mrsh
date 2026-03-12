@@ -537,6 +537,34 @@ async fn async_main(cli: Cli) -> Result<()> {
                 let output = quic.exec(&command).await?;
                 print!("{}", output);
             }
+            "push" => {
+                if args.len() < 3 {
+                    bail!("push requires <local> <remote>");
+                }
+                let data = std::fs::read(&args[1])?;
+                let written = quic.push(&args[2], &data).await?;
+                eprintln!("pushed {} bytes to {}", written, args[2]);
+            }
+            "pull" | "cat" => {
+                if args.len() < 2 {
+                    bail!("{} requires <remote> [local]", cmd);
+                }
+                let data = quic.pull(&args[1]).await?;
+                if cmd == "cat" || args.len() < 3 {
+                    std::io::Write::write_all(&mut std::io::stdout(), &data)?;
+                } else {
+                    std::fs::write(&args[2], &data)?;
+                    eprintln!("pulled {} bytes to {}", data.len(), args[2]);
+                }
+            }
+            "ls" => {
+                let path = args.get(1).map(|s| s.as_str()).unwrap_or(".");
+                let files = quic.ls(path).await?;
+                for f in &files {
+                    let kind = if f.is_dir { "d" } else { "-" };
+                    println!("{}{} {:>10} {} {}", kind, f.mode, f.size, f.mod_time, f.name);
+                }
+            }
             _ => bail!("command {:?} is not supported over QUIC (omit --quic)", cmd),
         }
         quic.close();

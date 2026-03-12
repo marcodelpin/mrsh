@@ -177,6 +177,33 @@ impl QuicClient {
         Ok(data)
     }
 
+    /// List a remote directory. Returns a vector of FileInfo entries.
+    ///
+    /// Protocol: `ls[\0path]\n`. Server responds with newline-delimited JSON
+    /// array of FileInfo, or `ERROR: <msg>\n`.
+    pub async fn ls(&self, remote_path: &str) -> Result<Vec<protocol::FileInfo>> {
+        let (mut send, recv) = self.conn.open_bi().await.context("open ls stream")?;
+        let header = if remote_path.is_empty() {
+            "ls\n".to_string()
+        } else {
+            format!("ls\0{}\n", remote_path)
+        };
+        send.write_all(header.as_bytes()).await.context("write ls header")?;
+        send.finish().context("finish ls send")?;
+
+        let mut reader = BufReader::new(recv);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.context("read ls response")?;
+
+        if line.starts_with("ERROR:") {
+            bail!("remote ls: {}", line.trim());
+        }
+
+        let files: Vec<protocol::FileInfo> =
+            serde_json::from_str(&line).context("parse ls response")?;
+        Ok(files)
+    }
+
     /// Close the connection gracefully.
     pub fn close(&self) {
         self.conn.close(quinn::VarInt::from_u32(0), b"done");
