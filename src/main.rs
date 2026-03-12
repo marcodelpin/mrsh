@@ -525,6 +525,36 @@ async fn async_main(cli: Cli) -> Result<()> {
         .await
         .context("QUIC connect")?;
 
+        // ── QUIC SOCKS5 (-D flag) ─────────────────────────────
+        if let Some(socks_port) = cli.dynamic_port {
+            use std::sync::Arc;
+            use tokio::net::TcpListener;
+
+            eprintln!(
+                "SOCKS5 proxy (QUIC): 127.0.0.1:{} → {}:{}",
+                socks_port, resolved_host, resolved_port
+            );
+
+            let quic = Arc::new(quic);
+            let bind_addr = format!("127.0.0.1:{}", socks_port);
+            let listener = TcpListener::bind(&bind_addr)
+                .await
+                .with_context(|| format!("SOCKS5: bind {}", bind_addr))?;
+            eprintln!("SOCKS5 proxy listening on {}", bind_addr);
+
+            loop {
+                let (client_stream, peer) = listener.accept().await?;
+                client_stream.set_nodelay(true).ok();
+                let quic = Arc::clone(&quic);
+
+                tokio::spawn(async move {
+                    if let Err(e) = handle_quic_socks5_conn(client_stream, &quic).await {
+                        tracing::debug!("SOCKS5/QUIC: {} error: {}", peer, e);
+                    }
+                });
+            }
+        }
+
         match cmd {
             "ping" => {
                 println!("PONG (QUIC)");
@@ -2061,6 +2091,102 @@ async fn run_watch<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Sen
         }
     }
 
+    Ok(())
+}
+
+// ── QUIC SOCKS5 helper ──────────────────────────────────────
+
+/// Handle one SOCKS5 client connection tunnelled over QUIC.
+///
+/// Performs the SOCKS5 handshake, extracts the CONNECT target, opens a
+/// new QUIC tunnel stream to that target, and relays traffic.
+#[cfg(feature = "quic")]
+async fn handle_quic_socks5_conn(
+    mut client: tokio::net::TcpStream,
+    quic: &rsh_client::quic::QuicClient,
+) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // SOCKS5 version constants
+    const V5: u8 = 0x05;
+    const CMD_CONNECT: u8 = 0x01;
+    const ATYP_IPV4: u8 = 0x01;
+    const ATYP_DOMAIN: u8 = 0x03;
+    const ATYP_IPV6: u8 = 0x04;
+    const REP_SUCCESS: u8 = 0x00;
+    const REP_FAILURE: u8 = 0x01;
+    const REP_CMD_UNSUPPORTED: u8 = 0x07;
+    const REP_ADDR_UNSUPPORTED: u8 = 0x08;
+
+    // Greeting: version + number of auth methods
+    let mut buf = [0u8; 2];
+    client.read_exact(&mut buf).await?;
+    anyhow::ensure!(buf[0] == V5, "not SOCKS5 (version={})", buf[0]);
+    let n = buf[1] as usize;
+    let mut methods = vec![0u8; n];
+    client.read_exact(&mut methods).await?;
+    // Respond: no auth required (0x00)
+    client.write_all(&[V5, 0x00]).await?;
+
+    // CONNECT request: VER CMD RSV ATYP <addr> <port>
+    let mut hdr = [0u8; 4];
+    client.read_exact(&mut hdr).await?;
+    anyhow::ensure!(hdr[0] == V5, "bad SOCKS5 request version");
+    if hdr[1] != CMD_CONNECT {
+        client.write_all(&[V5, REP_CMD_UNSUPPORTED, 0, ATYP_IPV4, 0, 0, 0, 0, 0, 0]).await.ok();
+        anyhow::bail!("unsupported SOCKS5 command {}", hdr[1]);
+    }
+    let target_host = match hdr[3] {
+        ATYP_IPV4 => {
+            let mut a = [0u8; 4];
+            client.read_exact(&mut a).await?;
+            format!("{}.{}.{}.{}", a[0], a[1], a[2], a[3])
+        }
+        ATYP_DOMAIN => {
+            let len = {
+                let mut b = [0u8; 1];
+                client.read_exact(&mut b).await?;
+                b[0] as usize
+            };
+            let mut d = vec![0u8; len];
+            client.read_exact(&mut d).await?;
+            String::from_utf8_lossy(&d).to_string()
+        }
+        ATYP_IPV6 => {
+            let mut a = [0u8; 16];
+            client.read_exact(&mut a).await?;
+            let ip = std::net::Ipv6Addr::from(a);
+            format!("[{}]", ip)
+        }
+        atyp => {
+            client.write_all(&[V5, REP_ADDR_UNSUPPORTED, 0, ATYP_IPV4, 0, 0, 0, 0, 0, 0]).await.ok();
+            anyhow::bail!("unsupported SOCKS5 address type {}", atyp);
+        }
+    };
+    let mut port_buf = [0u8; 2];
+    client.read_exact(&mut port_buf).await?;
+    let target_port = u16::from_be_bytes(port_buf);
+    let target = format!("{}:{}", target_host, target_port);
+
+    tracing::debug!("SOCKS5/QUIC: CONNECT {}", target);
+
+    // Open QUIC tunnel to target
+    match quic.open_tunnel(&target).await {
+        Ok((mut quic_send, mut quic_recv)) => {
+            // Success reply: VER REP RSV ATYP BND.ADDR BND.PORT (bound to 0.0.0.0:0)
+            client.write_all(&[V5, REP_SUCCESS, 0, ATYP_IPV4, 0, 0, 0, 0, 0, 0]).await?;
+            // Relay bidirectionally
+            let (mut tcp_read, mut tcp_write) = client.into_split();
+            tokio::select! {
+                _ = tokio::io::copy(&mut quic_recv, &mut tcp_write) => {}
+                _ = tokio::io::copy(&mut tcp_read, &mut quic_send) => {}
+            }
+        }
+        Err(e) => {
+            client.write_all(&[V5, REP_FAILURE, 0, ATYP_IPV4, 0, 0, 0, 0, 0, 0]).await.ok();
+            anyhow::bail!("QUIC open_tunnel {}: {}", target, e);
+        }
+    }
     Ok(())
 }
 
