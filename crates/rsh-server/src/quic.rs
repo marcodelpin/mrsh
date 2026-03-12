@@ -19,12 +19,15 @@ use rsh_core::{auth, protocol};
 
 use crate::exec;
 use crate::handler::ServerContext;
+use crate::sync;
 use crate::tunnel;
 
 /// Channel type constants.
 const CHAN_TYPE_TUNNEL: &str = "tunnel";
 const CHAN_TYPE_UDP_TUNNEL: &str = "udp-tunnel";
 const CHAN_TYPE_EXEC: &str = "exec";
+const CHAN_TYPE_PUSH: &str = "push";
+const CHAN_TYPE_PULL: &str = "pull";
 
 /// Start the QUIC listener on the same port as TLS (UDP).
 ///
@@ -327,6 +330,20 @@ async fn handle_quic_stream(
             }
             handle_quic_exec(&mut send, &mut reader).await
         }
+        CHAN_TYPE_PUSH => {
+            if !perms.allow_push {
+                send.write_all(b"ERROR: push not permitted for this key\n").await.ok();
+                return Ok(());
+            }
+            handle_quic_push(&mut send, &mut reader, target).await
+        }
+        CHAN_TYPE_PULL => {
+            if !perms.allow_pull {
+                send.write_all(b"ERROR: pull not permitted for this key\n").await.ok();
+                return Ok(());
+            }
+            handle_quic_pull(&mut send, &mut reader, target).await
+        }
         _ => {
             send.write_all(b"ERROR: unknown channel type\n").await.ok();
             Ok(())
@@ -496,6 +513,115 @@ async fn handle_quic_exec(
         send.write_all(msg.as_bytes()).await.ok();
     }
 
+    Ok(())
+}
+
+/// Push a file over QUIC: read 8-byte BE size + raw data, write to `path`.
+///
+/// Header already parsed: `push\0<path>\n`. `target` is the remote path.
+/// Protocol: client sends 8-byte BE u64 size, then `size` bytes of raw data.
+/// Response: `OK\n<bytes_written>\n` or `ERROR: <msg>\n`.
+async fn handle_quic_push(
+    send: &mut quinn::SendStream,
+    reader: &mut BufReader<quinn::RecvStream>,
+    target: &str,
+) -> Result<()> {
+    // Validate path
+    if let Err(e) = sync::sanitize_path(target) {
+        let msg = format!("ERROR: {}\n", e);
+        send.write_all(msg.as_bytes()).await.ok();
+        return Ok(());
+    }
+
+    if target.is_empty() {
+        send.write_all(b"ERROR: empty path\n").await.ok();
+        return Ok(());
+    }
+
+    // Read 8-byte BE size
+    let mut size_buf = [0u8; 8];
+    if let Err(e) = reader.read_exact(&mut size_buf).await {
+        let msg = format!("ERROR: failed to read size: {}\n", e);
+        send.write_all(msg.as_bytes()).await.ok();
+        return Ok(());
+    }
+    let size = u64::from_be_bytes(size_buf);
+
+    // Read raw data
+    let mut data = vec![0u8; size as usize];
+    if let Err(e) = reader.read_exact(&mut data).await {
+        let msg = format!("ERROR: failed to read data: {}\n", e);
+        send.write_all(msg.as_bytes()).await.ok();
+        return Ok(());
+    }
+
+    // Create parent directories
+    let path = std::path::Path::new(target);
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                let msg = format!("ERROR: create dirs: {}\n", e);
+                send.write_all(msg.as_bytes()).await.ok();
+                return Ok(());
+            }
+        }
+    }
+
+    // Write file
+    match tokio::fs::write(path, &data).await {
+        Ok(()) => {
+            let resp = format!("OK\n{}\n", size);
+            send.write_all(resp.as_bytes()).await.ok();
+            info!("[QUIC] push: wrote {} bytes to {}", size, target);
+        }
+        Err(e) => {
+            let msg = format!("ERROR: write file: {}\n", e);
+            send.write_all(msg.as_bytes()).await.ok();
+        }
+    }
+
+    Ok(())
+}
+
+/// Pull a file over QUIC: read path from header, send file data.
+///
+/// Header already parsed: `pull\0<path>\n`. `target` is the remote path.
+/// Response: `OK\n` + 8-byte BE u64 size + raw data, or `ERROR: <msg>\n`.
+async fn handle_quic_pull(
+    send: &mut quinn::SendStream,
+    _reader: &mut BufReader<quinn::RecvStream>,
+    target: &str,
+) -> Result<()> {
+    // Validate path
+    if let Err(e) = sync::sanitize_path(target) {
+        let msg = format!("ERROR: {}\n", e);
+        send.write_all(msg.as_bytes()).await.ok();
+        return Ok(());
+    }
+
+    if target.is_empty() {
+        send.write_all(b"ERROR: empty path\n").await.ok();
+        return Ok(());
+    }
+
+    // Read file
+    let data = match tokio::fs::read(target).await {
+        Ok(d) => d,
+        Err(e) => {
+            let msg = format!("ERROR: {}\n", e);
+            send.write_all(msg.as_bytes()).await.ok();
+            return Ok(());
+        }
+    };
+
+    let size = data.len() as u64;
+
+    // Send OK + size + data
+    send.write_all(b"OK\n").await.context("send OK")?;
+    send.write_all(&size.to_be_bytes()).await.context("send size")?;
+    send.write_all(&data).await.context("send data")?;
+
+    info!("[QUIC] pull: sent {} bytes from {}", size, target);
     Ok(())
 }
 
@@ -910,5 +1036,287 @@ mod tests {
     fn extract_invalid_sig_fails() {
         let short = vec![0x42u8; 10];
         assert!(extract_ed25519_sig(&short).is_err());
+    }
+
+    #[tokio::test]
+    async fn quic_push_pull_roundtrip() {
+        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        let ctx = make_test_context(&signing_key);
+        let (server_ep, client_ep, server_addr) = make_quic_endpoint_pair().unwrap();
+
+        let ctx_clone = ctx.clone();
+        let server_handle = tokio::spawn(async move {
+            let incoming = server_ep.accept().await.unwrap();
+            let conn = incoming.await.unwrap();
+            handle_quic_connection(conn, ctx_clone).await
+        });
+
+        let conn = client_ep
+            .connect(server_addr, "localhost")
+            .unwrap()
+            .await
+            .unwrap();
+
+        // Authenticate
+        let result = client_authenticate(&conn, &signing_key).await.unwrap();
+        assert!(result.success);
+
+        // Create temp file path
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let file_path = tmp_dir.path().join("test_push.dat");
+        let file_path_str = file_path.to_str().unwrap();
+
+        // === PUSH ===
+        let test_data = b"hello QUIC push/pull!";
+        {
+            let (mut send, recv) = conn.open_bi().await.unwrap();
+            let header = format!("push\0{}\n", file_path_str);
+            send.write_all(header.as_bytes()).await.unwrap();
+
+            let size = test_data.len() as u64;
+            send.write_all(&size.to_be_bytes()).await.unwrap();
+            send.write_all(test_data).await.unwrap();
+            send.finish().unwrap();
+
+            let mut response = String::new();
+            let mut reader = BufReader::new(recv);
+            reader.read_to_string(&mut response).await.unwrap();
+            assert!(
+                response.starts_with("OK\n"),
+                "push should succeed, got: {:?}",
+                response
+            );
+        }
+
+        // Verify file was written
+        let written = tokio::fs::read(&file_path).await.unwrap();
+        assert_eq!(written, test_data);
+
+        // === PULL ===
+        {
+            let (mut send, recv) = conn.open_bi().await.unwrap();
+            let header = format!("pull\0{}\n", file_path_str);
+            send.write_all(header.as_bytes()).await.unwrap();
+            send.finish().unwrap();
+
+            let mut reader = BufReader::new(recv);
+            let mut status_line = String::new();
+            reader.read_line(&mut status_line).await.unwrap();
+            assert_eq!(status_line.trim(), "OK");
+
+            let mut size_buf = [0u8; 8];
+            reader.read_exact(&mut size_buf).await.unwrap();
+            let size = u64::from_be_bytes(size_buf);
+            assert_eq!(size, test_data.len() as u64);
+
+            let mut data = vec![0u8; size as usize];
+            reader.read_exact(&mut data).await.unwrap();
+            assert_eq!(data, test_data);
+        }
+
+        conn.close(quinn::VarInt::from_u32(0), b"done");
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test]
+    async fn quic_push_permission_denied() {
+        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+
+        // Create context with push disabled
+        let pub_bytes = signing_key.verifying_key().to_bytes();
+        let mut perms = auth::KeyPermissions::default();
+        perms.allow_push = false;
+        let ak = auth::AuthorizedKey {
+            key_type: "ssh-ed25519".to_string(),
+            key_data: pub_bytes.to_vec(),
+            comment: Some("test@host".to_string()),
+            permissions: perms,
+        };
+        let ctx = Arc::new(ServerContext {
+            authorized_keys: vec![ak],
+            revoked_keys: std::collections::HashSet::new(),
+            server_version: "0.1.0-test".to_string(),
+            banner: None,
+            caps: vec![],
+            session_store: session::SessionStore::new(),
+            rate_limiter: ratelimit::AuthRateLimiter::new(),
+            allowed_tunnels: vec![],
+            totp_secrets: vec![],
+            totp_recovery_path: None,
+        });
+
+        let (server_ep, client_ep, server_addr) = make_quic_endpoint_pair().unwrap();
+
+        let ctx_clone = ctx.clone();
+        let server_handle = tokio::spawn(async move {
+            let incoming = server_ep.accept().await.unwrap();
+            let conn = incoming.await.unwrap();
+            handle_quic_connection(conn, ctx_clone).await
+        });
+
+        let conn = client_ep
+            .connect(server_addr, "localhost")
+            .unwrap()
+            .await
+            .unwrap();
+
+        let result = client_authenticate(&conn, &signing_key).await.unwrap();
+        assert!(result.success);
+
+        // Try push — should be denied
+        let (mut send, recv) = conn.open_bi().await.unwrap();
+        send.write_all(b"push\0/tmp/denied.dat\n").await.unwrap();
+        send.write_all(&8u64.to_be_bytes()).await.unwrap();
+        send.write_all(b"testdata").await.unwrap();
+        send.finish().unwrap();
+
+        let mut response = String::new();
+        let mut reader = BufReader::new(recv);
+        reader.read_to_string(&mut response).await.unwrap();
+        assert!(
+            response.contains("ERROR") && response.contains("not permitted"),
+            "expected permission denied, got: {:?}",
+            response
+        );
+
+        conn.close(quinn::VarInt::from_u32(0), b"done");
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test]
+    async fn quic_pull_nonexistent_file() {
+        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        let ctx = make_test_context(&signing_key);
+        let (server_ep, client_ep, server_addr) = make_quic_endpoint_pair().unwrap();
+
+        let ctx_clone = ctx.clone();
+        let server_handle = tokio::spawn(async move {
+            let incoming = server_ep.accept().await.unwrap();
+            let conn = incoming.await.unwrap();
+            handle_quic_connection(conn, ctx_clone).await
+        });
+
+        let conn = client_ep
+            .connect(server_addr, "localhost")
+            .unwrap()
+            .await
+            .unwrap();
+
+        let result = client_authenticate(&conn, &signing_key).await.unwrap();
+        assert!(result.success);
+
+        // Pull nonexistent file
+        let (mut send, recv) = conn.open_bi().await.unwrap();
+        send.write_all(b"pull\0/tmp/nonexistent_quic_test_xyz.dat\n")
+            .await
+            .unwrap();
+        send.finish().unwrap();
+
+        let mut response = String::new();
+        let mut reader = BufReader::new(recv);
+        reader.read_to_string(&mut response).await.unwrap();
+        assert!(
+            response.contains("ERROR"),
+            "expected error for missing file, got: {:?}",
+            response
+        );
+
+        conn.close(quinn::VarInt::from_u32(0), b"done");
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test]
+    async fn quic_push_creates_parent_dirs() {
+        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        let ctx = make_test_context(&signing_key);
+        let (server_ep, client_ep, server_addr) = make_quic_endpoint_pair().unwrap();
+
+        let ctx_clone = ctx.clone();
+        let server_handle = tokio::spawn(async move {
+            let incoming = server_ep.accept().await.unwrap();
+            let conn = incoming.await.unwrap();
+            handle_quic_connection(conn, ctx_clone).await
+        });
+
+        let conn = client_ep
+            .connect(server_addr, "localhost")
+            .unwrap()
+            .await
+            .unwrap();
+
+        let result = client_authenticate(&conn, &signing_key).await.unwrap();
+        assert!(result.success);
+
+        // Push to nested path that doesn't exist yet
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let nested = tmp_dir.path().join("a").join("b").join("c").join("test.txt");
+        let nested_str = nested.to_str().unwrap();
+
+        let (mut send, recv) = conn.open_bi().await.unwrap();
+        let header = format!("push\0{}\n", nested_str);
+        send.write_all(header.as_bytes()).await.unwrap();
+
+        let data = b"nested data";
+        send.write_all(&(data.len() as u64).to_be_bytes()).await.unwrap();
+        send.write_all(data).await.unwrap();
+        send.finish().unwrap();
+
+        let mut response = String::new();
+        let mut reader = BufReader::new(recv);
+        reader.read_to_string(&mut response).await.unwrap();
+        assert!(response.starts_with("OK\n"), "got: {:?}", response);
+
+        // Verify
+        let content = tokio::fs::read(&nested).await.unwrap();
+        assert_eq!(content, data);
+
+        conn.close(quinn::VarInt::from_u32(0), b"done");
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test]
+    async fn quic_push_empty_file() {
+        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        let ctx = make_test_context(&signing_key);
+        let (server_ep, client_ep, server_addr) = make_quic_endpoint_pair().unwrap();
+
+        let ctx_clone = ctx.clone();
+        let server_handle = tokio::spawn(async move {
+            let incoming = server_ep.accept().await.unwrap();
+            let conn = incoming.await.unwrap();
+            handle_quic_connection(conn, ctx_clone).await
+        });
+
+        let conn = client_ep
+            .connect(server_addr, "localhost")
+            .unwrap()
+            .await
+            .unwrap();
+
+        let result = client_authenticate(&conn, &signing_key).await.unwrap();
+        assert!(result.success);
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let file_path = tmp_dir.path().join("empty.dat");
+        let file_path_str = file_path.to_str().unwrap();
+
+        // Push empty file
+        let (mut send, recv) = conn.open_bi().await.unwrap();
+        let header = format!("push\0{}\n", file_path_str);
+        send.write_all(header.as_bytes()).await.unwrap();
+        send.write_all(&0u64.to_be_bytes()).await.unwrap();
+        send.finish().unwrap();
+
+        let mut response = String::new();
+        let mut reader = BufReader::new(recv);
+        reader.read_to_string(&mut response).await.unwrap();
+        assert!(response.starts_with("OK\n"), "got: {:?}", response);
+
+        // Verify empty file
+        let content = tokio::fs::read(&file_path).await.unwrap();
+        assert!(content.is_empty());
+
+        conn.close(quinn::VarInt::from_u32(0), b"done");
+        let _ = server_handle.await;
     }
 }

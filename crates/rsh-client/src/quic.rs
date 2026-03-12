@@ -111,6 +111,72 @@ impl QuicClient {
         Ok((send, reader.into_inner()))
     }
 
+    /// Push data to a remote file path. Returns bytes written.
+    ///
+    /// Protocol: `push\0<path>\n` + 8-byte BE u64 size + raw data.
+    /// Server responds with `OK\n<size>\n` or `ERROR: <msg>\n`.
+    pub async fn push(&self, remote_path: &str, data: &[u8]) -> Result<u64> {
+        let (mut send, recv) = self.conn.open_bi().await.context("open push stream")?;
+
+        // Header: push\0path\n
+        let header = format!("push\0{}\n", remote_path);
+        send.write_all(header.as_bytes()).await.context("write push header")?;
+
+        // 8-byte BE size + raw data
+        let size = data.len() as u64;
+        send.write_all(&size.to_be_bytes()).await.context("write push size")?;
+        send.write_all(data).await.context("write push data")?;
+        send.finish().context("finish push send")?;
+
+        // Read response
+        let mut response = String::new();
+        let mut reader = BufReader::new(recv);
+        reader.read_to_string(&mut response).await.context("read push response")?;
+
+        if response.starts_with("OK\n") {
+            let written: u64 = response[3..].trim().parse().unwrap_or(size);
+            Ok(written)
+        } else if response.starts_with("ERROR:") {
+            bail!("remote push: {}", response.trim());
+        } else {
+            bail!("unexpected push response: {:?}", response);
+        }
+    }
+
+    /// Pull a file from a remote path. Returns file contents.
+    ///
+    /// Protocol: `pull\0<path>\n`. Server responds with
+    /// `OK\n` + 8-byte BE u64 size + raw data, or `ERROR: <msg>\n`.
+    pub async fn pull(&self, remote_path: &str) -> Result<Vec<u8>> {
+        let (mut send, recv) = self.conn.open_bi().await.context("open pull stream")?;
+
+        // Header: pull\0path\n
+        let header = format!("pull\0{}\n", remote_path);
+        send.write_all(header.as_bytes()).await.context("write pull header")?;
+        send.finish().context("finish pull send")?;
+
+        // Read first line: OK or ERROR
+        let mut reader = BufReader::new(recv);
+        let mut status_line = String::new();
+        reader.read_line(&mut status_line).await.context("read pull status")?;
+
+        let status = status_line.trim();
+        if status != "OK" {
+            bail!("remote pull: {}", status);
+        }
+
+        // Read 8-byte BE size
+        let mut size_buf = [0u8; 8];
+        reader.read_exact(&mut size_buf).await.context("read pull size")?;
+        let size = u64::from_be_bytes(size_buf);
+
+        // Read raw data
+        let mut data = vec![0u8; size as usize];
+        reader.read_exact(&mut data).await.context("read pull data")?;
+
+        Ok(data)
+    }
+
     /// Close the connection gracefully.
     pub fn close(&self) {
         self.conn.close(quinn::VarInt::from_u32(0), b"done");

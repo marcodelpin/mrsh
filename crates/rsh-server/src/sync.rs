@@ -39,7 +39,7 @@ static BLOCK_CACHE: LazyLock<Mutex<blockcache::Cache>> = LazyLock::new(|| {
 });
 
 /// Sanitize a file path: reject null bytes and newlines.
-fn sanitize_path(path: &str) -> Result<&str, String> {
+pub fn sanitize_path(path: &str) -> Result<&str, String> {
     if path.as_bytes().contains(&0) {
         return Err("path contains null byte".to_string());
     }
@@ -1102,7 +1102,7 @@ mod tests {
     /// should produce 'M' messages instead of 'D' messages.
     #[tokio::test]
     async fn pull_delta_with_matching_signatures() {
-        use rsh_transfer::delta::{BLOCK_SIZE, BlockSig};
+        use rsh_transfer::delta::BLOCK_SIZE;
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("delta-match.bin");
