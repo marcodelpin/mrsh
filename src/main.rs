@@ -622,6 +622,79 @@ async fn async_main(cli: Cli) -> Result<()> {
             "shell" => {
                 rsh_client::shell::run_quic_shell(&quic).await?;
             }
+            // ── Fleet ops: route through exec with native-equivalent PowerShell ──
+            "info" => {
+                let output = quic.exec("[PSCustomObject]@{Hostname=$env:COMPUTERNAME; OS=[Environment]::OSVersion.VersionString; Arch=[Environment]::Is64BitOperatingSystem} | ConvertTo-Json").await?;
+                println!("{}", output);
+            }
+            "ps" => {
+                let output = quic.exec("Get-Process | Select-Object Id,ProcessName,CPU,WorkingSet64 | ConvertTo-Json").await?;
+                println!("{}", output);
+            }
+            "kill" => {
+                if args.len() < 2 {
+                    bail!("kill requires a PID");
+                }
+                let output = quic.exec(&format!("Stop-Process -Id {} -Force", args[1])).await?;
+                if !output.is_empty() {
+                    println!("{}", output);
+                }
+            }
+            "tail" => {
+                if args.len() < 2 {
+                    bail!("tail requires <path> [lines]");
+                }
+                let lines: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
+                let escaped = args[1].replace('\'', "''");
+                let output = quic.exec(&format!("Get-Content '{}' -Tail {}", escaped, lines)).await?;
+                print!("{}", output);
+            }
+            "filever" => {
+                if args.len() < 2 {
+                    bail!("filever requires <path>");
+                }
+                let escaped = args[1].replace('\'', "''");
+                let output = quic.exec(&format!("(Get-Item '{}').VersionInfo | ConvertTo-Json", escaped)).await?;
+                println!("{}", output);
+            }
+            "eventlog" | "evtlog" => {
+                let log_name = args.get(1).map(|s| s.as_str()).unwrap_or("System");
+                let count: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(50);
+                let output = quic.exec(&format!(
+                    "Get-EventLog -LogName {} -Newest {} | Select-Object TimeGenerated,EntryType,Source,Message | ConvertTo-Json",
+                    log_name, count
+                )).await?;
+                println!("{}", output);
+            }
+            "screenshot" => {
+                let display: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                let quality: u8 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(75);
+                // Use PowerShell .NET to capture screen and return base64
+                let ps_cmd = format!(
+                    "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; \
+                     $s = [System.Windows.Forms.Screen]::AllScreens[{}]; \
+                     $b = [System.Drawing.Bitmap]::new($s.Bounds.Width, $s.Bounds.Height); \
+                     $g = [System.Drawing.Graphics]::FromImage($b); \
+                     $g.CopyFromScreen($s.Bounds.Location, [System.Drawing.Point]::Empty, $s.Bounds.Size); \
+                     $ms = [System.IO.MemoryStream]::new(); \
+                     $ep = [System.Drawing.Imaging.Encoder]::Quality; \
+                     $epc = [System.Drawing.Imaging.EncoderParameters]::new(1); \
+                     $epc.Param[0] = [System.Drawing.Imaging.EncoderParameter]::new($ep, [long]{}); \
+                     $codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object {{ $_.MimeType -eq 'image/jpeg' }}; \
+                     $b.Save($ms, $codec, $epc); \
+                     [Convert]::ToBase64String($ms.ToArray())",
+                    display, quality
+                );
+                let b64_output = quic.exec(&ps_cmd).await?;
+                let data = base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD,
+                    b64_output.trim(),
+                )
+                .context("decode screenshot base64")?;
+                let out_path = format!("screenshot_{}.jpg", display);
+                std::fs::write(&out_path, &data)?;
+                eprintln!("saved {} ({} bytes)", out_path, data.len());
+            }
             _ => bail!("command {:?} is not supported over QUIC (omit --quic)", cmd),
         }
         quic.close();
