@@ -237,6 +237,16 @@ message GroupPeer {
   uint64 last_seen_secs = 5;  // seconds since UNIX epoch
 }
 
+// --- Fleet peer list (rsh extension) ---
+
+message ListPeers {
+  string licence_key = 1;  // must match server's --key
+}
+
+message ListPeersResponse {
+  repeated GroupPeer peers = 1;  // reuse GroupPeer format
+}
+
 // --- Top-level envelope ---
 // Field numbers match RustDesk RendezvousMessage for backwards compatibility.
 
@@ -269,5 +279,7 @@ message RendezvousMessage {
     MetricsResponse metrics_response = 33;
     GroupQuery group_query = 34;
     GroupQueryResponse group_query_response = 35;
+    ListPeers list_peers = 36;
+    ListPeersResponse list_peers_response = 37;
   }
 }

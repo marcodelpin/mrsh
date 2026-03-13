@@ -388,6 +388,10 @@ impl RendezvousServer {
                 self.handle_group_query(gq, peers)
             }
 
+            proto::rendezvous_message::Union::ListPeers(lp) => {
+                self.handle_list_peers(lp, peers)
+            }
+
             _ => None,
         }
     }
@@ -450,6 +454,47 @@ impl RendezvousServer {
                 )),
             }),
         }
+    }
+
+    /// Handle ListPeers: return ALL registered peers (auth'd by licence_key).
+    fn handle_list_peers(
+        &self,
+        lp: proto::ListPeers,
+        peers: &std::sync::Mutex<HashMap<String, PeerEntry>>,
+    ) -> Option<proto::RendezvousMessage> {
+        // Authenticate: licence_key must match server's key
+        if !self.key.is_empty() && lp.licence_key != self.key {
+            tracing::warn!("rdv: list_peers rejected — key mismatch");
+            return None;
+        }
+
+        let map = peers.lock().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+
+        let all_peers: Vec<proto::GroupPeer> = map
+            .iter()
+            .map(|(id, entry)| {
+                let last_seen_secs = now.as_secs()
+                    - entry.last_seen.elapsed().as_secs();
+                proto::GroupPeer {
+                    device_id: id.clone(),
+                    hostname: entry.hostname.clone(),
+                    platform: entry.platform.clone(),
+                    socket_addr: encode_socket_addr(&entry.addr),
+                    last_seen_secs,
+                }
+            })
+            .collect();
+
+        tracing::info!("rdv: list_peers — {} peers", all_peers.len());
+
+        Some(proto::RendezvousMessage {
+            union: Some(proto::rendezvous_message::Union::ListPeersResponse(
+                proto::ListPeersResponse { peers: all_peers },
+            )),
+        })
     }
 
     /// Handle a GroupQuery: return all peers matching the group_hash,
@@ -683,6 +728,71 @@ impl Client {
         }
 
         bail!("group query failed on all servers; last: {}", last_err.unwrap_or_else(|| anyhow::anyhow!("no servers")));
+    }
+
+    /// List ALL peers registered at hbbs (authenticated by licence_key).
+    pub async fn list_peers(&self) -> Result<Vec<GroupPeerInfo>> {
+        if self.servers.is_empty() {
+            bail!("no rendezvous server configured");
+        }
+
+        let lp = proto::ListPeers {
+            licence_key: self.licence_key.clone(),
+        };
+        let msg = proto::RendezvousMessage {
+            union: Some(proto::rendezvous_message::Union::ListPeers(lp)),
+        };
+        let msg_bytes = msg.encode_to_vec();
+
+        let mut last_err = None;
+        for srv in &self.servers {
+            let sock = match UdpSocket::bind("0.0.0.0:0").await {
+                Ok(s) => s,
+                Err(e) => { last_err = Some(anyhow::anyhow!("bind: {e}")); continue; }
+            };
+            if let Err(e) = sock.connect(srv).await {
+                last_err = Some(anyhow::anyhow!("connect {srv}: {e}"));
+                continue;
+            }
+            if let Err(e) = sock.send(&msg_bytes).await {
+                last_err = Some(anyhow::anyhow!("send to {srv}: {e}"));
+                continue;
+            }
+
+            let mut buf = vec![0u8; 65535];
+            let n = match timeout(Duration::from_secs(5), sock.recv(&mut buf)).await {
+                Ok(Ok(n)) => n,
+                Ok(Err(e)) => { last_err = Some(e.into()); continue; }
+                Err(_) => { last_err = Some(anyhow::anyhow!("timeout from {srv}")); continue; }
+            };
+
+            let resp = match proto::RendezvousMessage::decode(&buf[..n]) {
+                Ok(r) => r,
+                Err(e) => { last_err = Some(e.into()); continue; }
+            };
+
+            if let Some(proto::rendezvous_message::Union::ListPeersResponse(lpr)) = resp.union {
+                let peers = lpr.peers.into_iter().map(|p| {
+                    let addr = if p.socket_addr.is_empty() {
+                        None
+                    } else {
+                        decode_socket_addr(&p.socket_addr).ok()
+                    };
+                    GroupPeerInfo {
+                        device_id: p.device_id,
+                        hostname: p.hostname,
+                        platform: p.platform,
+                        addr,
+                        last_seen_secs: p.last_seen_secs,
+                    }
+                }).collect();
+                return Ok(peers);
+            }
+
+            last_err = Some(anyhow::anyhow!("unexpected response from {srv}"));
+        }
+
+        bail!("list_peers failed on all servers; last: {}", last_err.unwrap_or_else(|| anyhow::anyhow!("no servers")));
     }
 
     /// Full resolution against a single server.
@@ -1942,5 +2052,79 @@ mod tests {
 
         cancel.cancel();
         hbbs_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rdv_list_peers_returns_all_registered() {
+        let srv = RendezvousServer::new("test-key", "relay.test:21117");
+        let peers: Arc<std::sync::Mutex<HashMap<String, PeerEntry>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+        // Register two peers
+        peers.lock().unwrap().insert(
+            "111".to_string(),
+            PeerEntry {
+                addr: "10.0.0.1:8822".parse().unwrap(),
+                last_seen: Instant::now(),
+                group_hash: String::new(),
+                hostname: "host-a".to_string(),
+                platform: "windows".to_string(),
+            },
+        );
+        peers.lock().unwrap().insert(
+            "222".to_string(),
+            PeerEntry {
+                addr: "10.0.0.2:8822".parse().unwrap(),
+                last_seen: Instant::now(),
+                group_hash: String::new(),
+                hostname: "host-b".to_string(),
+                platform: "linux".to_string(),
+            },
+        );
+
+        // Valid key → should get both peers
+        let msg = proto::RendezvousMessage {
+            union: Some(proto::rendezvous_message::Union::ListPeers(
+                proto::ListPeers { licence_key: "test-key".to_string() },
+            )),
+        };
+        let src: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        let resp = srv.handle_message(msg, src, &peers).unwrap();
+        match resp.union {
+            Some(proto::rendezvous_message::Union::ListPeersResponse(lpr)) => {
+                assert_eq!(lpr.peers.len(), 2);
+                let ids: Vec<&str> = lpr.peers.iter().map(|p| p.device_id.as_str()).collect();
+                assert!(ids.contains(&"111"));
+                assert!(ids.contains(&"222"));
+            }
+            other => panic!("expected ListPeersResponse, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn rdv_list_peers_rejects_bad_key() {
+        let srv = RendezvousServer::new("correct-key", "relay.test:21117");
+        let peers: Arc<std::sync::Mutex<HashMap<String, PeerEntry>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+        peers.lock().unwrap().insert(
+            "111".to_string(),
+            PeerEntry {
+                addr: "10.0.0.1:8822".parse().unwrap(),
+                last_seen: Instant::now(),
+                group_hash: String::new(),
+                hostname: "host-a".to_string(),
+                platform: "windows".to_string(),
+            },
+        );
+
+        let msg = proto::RendezvousMessage {
+            union: Some(proto::rendezvous_message::Union::ListPeers(
+                proto::ListPeers { licence_key: "wrong-key".to_string() },
+            )),
+        };
+        let src: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        let resp = srv.handle_message(msg, src, &peers);
+        assert!(resp.is_none(), "bad key should be rejected");
     }
 }

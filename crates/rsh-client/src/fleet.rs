@@ -36,17 +36,33 @@ const MAX_CONCURRENT: usize = 10;
 /// Probe timeout per host.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Get status of all configured hosts.
+/// Get status of all fleet hosts.
+///
+/// Merges two sources:
+/// 1. Config hosts (local `~/.rsh/config` Host blocks) — user-defined aliases/overrides
+/// 2. hbbs peers (dynamic, via `ListPeers` query) — all registered peers
+///
+/// Config hosts take precedence: if a config host's DeviceID matches an hbbs peer,
+/// the config entry is used (with its alias name and hostname override).
+/// hbbs peers not covered by config are added as dynamic entries.
 pub async fn status(config: &Config) -> Vec<HostStatus> {
-    let hosts: Vec<&HostConfig> = config.hosts.iter().collect();
-    if hosts.is_empty() {
-        return Vec::new();
-    }
+    // Collect config hosts
+    let config_hosts: Vec<&HostConfig> = config.hosts.iter().collect();
+
+    // Query hbbs for dynamic peers (best-effort, non-blocking)
+    let hbbs_peers = discover_from_hbbs(config).await;
+
+    // Build the probe list: config hosts + any hbbs peers not already in config
+    let config_device_ids: std::collections::HashSet<String> = config_hosts
+        .iter()
+        .filter_map(|h| h.device_id.clone())
+        .collect();
 
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
     let mut handles = Vec::new();
 
-    for host in &hosts {
+    // Probe config hosts
+    for host in &config_hosts {
         let sem = semaphore.clone();
         let name = host.pattern.clone();
         let hostname = host
@@ -65,6 +81,30 @@ pub async fn status(config: &Config) -> Vec<HostStatus> {
         }));
     }
 
+    // Probe hbbs peers not already in config (by DeviceID match)
+    for peer in &hbbs_peers {
+        if config_device_ids.contains(&peer.device_id) {
+            continue; // config host takes precedence
+        }
+        let sem = semaphore.clone();
+        let name = if peer.hostname.is_empty() {
+            peer.device_id.clone()
+        } else {
+            peer.hostname.clone()
+        };
+        let hostname = peer.addr
+            .map(|a| a.ip().to_string())
+            .unwrap_or_else(|| name.clone());
+        let device_id = Some(peer.device_id.clone());
+        let rdv_server = config.rendezvous_server.clone();
+        let rdv_key = config.rendezvous_key.clone();
+
+        handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await.ok();
+            probe_host(&name, &hostname, 8822, device_id, rdv_server, rdv_key, None).await
+        }));
+    }
+
     let mut results = Vec::new();
     for handle in handles {
         match handle.await {
@@ -74,6 +114,35 @@ pub async fn status(config: &Config) -> Vec<HostStatus> {
     }
 
     results
+}
+
+/// Query hbbs for all registered peers (best-effort).
+async fn discover_from_hbbs(config: &Config) -> Vec<rsh_relay::rendezvous::GroupPeerInfo> {
+    let rdv_server = match &config.rendezvous_server {
+        Some(s) if !s.is_empty() => s.clone(),
+        _ => return Vec::new(),
+    };
+    let rdv_key = config.rendezvous_key.clone().unwrap_or_default();
+
+    let client = rsh_relay::rendezvous::Client {
+        servers: vec![rdv_server],
+        licence_key: rdv_key,
+        local_id: String::new(),
+        group_hash: String::new(),
+        hostname: String::new(),
+        platform: String::new(),
+    };
+
+    match client.list_peers().await {
+        Ok(peers) => {
+            debug!("hbbs: discovered {} peers", peers.len());
+            peers
+        }
+        Err(e) => {
+            debug!("hbbs: list_peers failed (non-fatal): {}", e);
+            Vec::new()
+        }
+    }
 }
 
 /// Probe a single host for version and capabilities.
