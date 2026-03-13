@@ -281,6 +281,62 @@ mod tests {
         assert!(is_black_image(&[], 5));
     }
 
+    /// Regression (orin-vi9): black-image detection must catch all-black frames
+    /// from RDP/locked sessions where GetDIBits returns zeroed buffer.
+    #[test]
+    fn is_black_image_near_threshold() {
+        // All pixels exactly at threshold → still black.
+        let mut data = vec![0u8; 400];
+        for pixel in data.chunks_exact_mut(4) {
+            pixel[0] = 5; // R = threshold
+            pixel[1] = 5; // G = threshold
+            pixel[2] = 5; // B = threshold
+        }
+        assert!(is_black_image(&data, 5));
+
+        // One pixel above threshold → not black.
+        data[0] = 6;
+        assert!(!is_black_image(&data, 5));
+    }
+
+    /// JPEG encoding of a synthetic frame — validates the encoding pipeline
+    /// used after GDI capture (BGRA→RGB→JPEG→base64).
+    #[test]
+    fn jpeg_encode_synthetic_frame() {
+        use base64::Engine;
+
+        let w: u32 = 10;
+        let h: u32 = 10;
+        // Create BGRA data with a gradient pattern.
+        let mut bgra = vec![0u8; (w * h * 4) as usize];
+        for i in 0..(w * h) as usize {
+            bgra[i * 4] = (i % 256) as u8;       // B
+            bgra[i * 4 + 1] = ((i * 2) % 256) as u8; // G
+            bgra[i * 4 + 2] = ((i * 3) % 256) as u8; // R
+            bgra[i * 4 + 3] = 255;                     // A
+        }
+
+        // BGRA → RGB (same conversion as capture_screen_windows).
+        let mut rgb = Vec::with_capacity((w * h * 3) as usize);
+        for pixel in bgra.chunks_exact(4) {
+            rgb.push(pixel[2]); // R
+            rgb.push(pixel[1]); // G
+            rgb.push(pixel[0]); // B
+        }
+
+        let img = image::RgbImage::from_raw(w, h, rgb).unwrap();
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 80);
+        img.write_with_encoder(encoder).unwrap();
+
+        let b64 = base64::engine::general_purpose::STANDARD.encode(buf.into_inner());
+        assert!(!b64.is_empty());
+        // Decode to verify it's valid base64.
+        let decoded = base64::engine::general_purpose::STANDARD.decode(&b64).unwrap();
+        // JPEG magic bytes: FF D8 FF.
+        assert_eq!(&decoded[..3], &[0xFF, 0xD8, 0xFF], "output must be valid JPEG");
+    }
+
     #[test]
     fn screenshot_linux_no_display() {
         #[cfg(not(target_os = "windows"))]

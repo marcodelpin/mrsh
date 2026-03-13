@@ -469,6 +469,43 @@ mod tests {
         assert!(empty.is_empty());
     }
 
+    /// Regression: index file → delete from disk → re-index must fail (not return
+    /// stale cached data).  Previously cache trusted entries for deleted files.
+    #[test]
+    fn reindex_after_delete_returns_error() {
+        let (mut cache, dir) = temp_cache();
+        let test_file = dir.path().join("ephemeral.bin");
+        std::fs::write(&test_file, vec![0xABu8; 8000]).unwrap();
+
+        // Index succeeds.
+        let info = cache.index_file(test_file.to_str().unwrap()).unwrap();
+        assert_eq!(info.size, 8000);
+
+        // Delete the file from disk.
+        std::fs::remove_file(&test_file).unwrap();
+
+        // Re-index must fail — file no longer exists.
+        let result = cache.index_file(test_file.to_str().unwrap());
+        assert!(result.is_err(), "index_file must fail for deleted file, not return stale cache");
+    }
+
+    /// Index file → modify content (same name) → re-index detects change.
+    #[test]
+    fn reindex_after_modify_detects_new_content() {
+        let (mut cache, dir) = temp_cache();
+        let test_file = dir.path().join("mutable.bin");
+        std::fs::write(&test_file, vec![0x01u8; 5000]).unwrap();
+
+        let info1 = cache.index_file(test_file.to_str().unwrap()).unwrap();
+
+        // Overwrite with different content and different size to ensure mtime/size changes.
+        std::fs::write(&test_file, vec![0x02u8; 6000]).unwrap();
+
+        let info2 = cache.index_file(test_file.to_str().unwrap()).unwrap();
+        assert_ne!(info1.content_hash, info2.content_hash, "content hash must change after modification");
+        assert_eq!(info2.size, 6000);
+    }
+
     #[test]
     fn cleanup_removes_old_entries() {
         let (mut cache, dir) = temp_cache();

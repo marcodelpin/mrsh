@@ -1268,6 +1268,124 @@ mod tests {
         }
     }
 
+    // --- Protobuf zero-value / edge case tests (orin-0td) ---
+
+    /// PunchHoleResponse with failure=0 (IdNotExist, protobuf default) but valid
+    /// socket_addr should return the address, not an error.  Failure=0 is the
+    /// protobuf default so a "success" response has failure==0 implicitly.
+    #[tokio::test]
+    async fn rdv_server_success_response_has_failure_zero() {
+        let srv = RendezvousServer::new("", "relay.test:21117");
+        let peers: Arc<std::sync::Mutex<HashMap<String, PeerEntry>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+        peers.lock().unwrap().insert(
+            "peer1".to_string(),
+            PeerEntry {
+                addr: "10.0.0.5:8822".parse().unwrap(),
+                last_seen: Instant::now(),
+                group_hash: String::new(),
+                hostname: String::new(),
+                platform: String::new(),
+            },
+        );
+
+        let punch = proto::PunchHoleRequest {
+            id: "peer1".to_string(),
+            ..Default::default()
+        };
+        let msg = proto::RendezvousMessage {
+            union: Some(proto::rendezvous_message::Union::PunchHoleRequest(punch)),
+        };
+        // Different IP so we get PunchHoleResponse (not FetchLocalAddr).
+        let src: SocketAddr = "203.0.113.1:9999".parse().unwrap();
+        let resp = srv.handle_message(msg, src, &peers).unwrap();
+        match resp.union {
+            Some(proto::rendezvous_message::Union::PunchHoleResponse(phr)) => {
+                // failure field is 0 (IdNotExist/default) — but socket_addr is populated,
+                // so the client should treat this as success.
+                assert_eq!(phr.failure, proto::punch_hole_response::Failure::IdNotExist as i32);
+                assert!(!phr.socket_addr.is_empty(), "socket_addr must be populated");
+                let decoded = decode_socket_addr(&phr.socket_addr).unwrap();
+                assert_eq!(decoded, "10.0.0.5:8822".parse::<SocketAddr>().unwrap());
+            }
+            other => panic!("expected PunchHoleResponse, got {:?}", other),
+        }
+    }
+
+    /// AddrMangle roundtrip with port 0 (edge case: port=0 after wrapping).
+    #[test]
+    fn addr_encode_decode_roundtrip_port_zero() {
+        let addr: SocketAddr = "192.168.1.1:0".parse().unwrap();
+        let encoded = encode_socket_addr_with_tm(&addr, 0);
+        let decoded = decode_socket_addr(&encoded).unwrap();
+        assert_eq!(decoded, addr);
+    }
+
+    /// AddrMangle roundtrip with port 65535 (max u16).
+    #[test]
+    fn addr_encode_decode_roundtrip_port_max() {
+        let addr: SocketAddr = "10.0.0.1:65535".parse().unwrap();
+        let encoded = encode_socket_addr_with_tm(&addr, 0xFFFFFFFF);
+        let decoded = decode_socket_addr(&encoded).unwrap();
+        assert_eq!(decoded, addr);
+    }
+
+    /// AddrMangle with 0.0.0.0 (all-zeros IP).
+    #[test]
+    fn addr_encode_decode_roundtrip_zero_ip() {
+        let addr: SocketAddr = "0.0.0.0:8822".parse().unwrap();
+        let encoded = encode_socket_addr_with_tm(&addr, 42);
+        let decoded = decode_socket_addr(&encoded).unwrap();
+        assert_eq!(decoded, addr);
+    }
+
+    /// AddrMangle with 255.255.255.255 (broadcast).
+    #[test]
+    fn addr_encode_decode_roundtrip_broadcast() {
+        let addr: SocketAddr = "255.255.255.255:65535".parse().unwrap();
+        let encoded = encode_socket_addr_with_tm(&addr, 0xDEADCAFE);
+        let decoded = decode_socket_addr(&encoded).unwrap();
+        assert_eq!(decoded, addr);
+    }
+
+    /// Port preservation: resolve result must carry the exact port registered.
+    #[tokio::test]
+    async fn rdv_server_preserves_registered_port() {
+        let srv = RendezvousServer::new("", "relay.test:21117");
+        let peers: Arc<std::sync::Mutex<HashMap<String, PeerEntry>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+        // Register on non-default port.
+        peers.lock().unwrap().insert(
+            "custom-port".to_string(),
+            PeerEntry {
+                addr: "172.16.0.1:9822".parse().unwrap(),
+                last_seen: Instant::now(),
+                group_hash: String::new(),
+                hostname: String::new(),
+                platform: String::new(),
+            },
+        );
+
+        let punch = proto::PunchHoleRequest {
+            id: "custom-port".to_string(),
+            ..Default::default()
+        };
+        let msg = proto::RendezvousMessage {
+            union: Some(proto::rendezvous_message::Union::PunchHoleRequest(punch)),
+        };
+        let src: SocketAddr = "198.51.100.1:12345".parse().unwrap();
+        let resp = srv.handle_message(msg, src, &peers).unwrap();
+        match resp.union {
+            Some(proto::rendezvous_message::Union::PunchHoleResponse(phr)) => {
+                let decoded = decode_socket_addr(&phr.socket_addr).unwrap();
+                assert_eq!(decoded.port(), 9822, "port must be preserved through encode/decode");
+            }
+            other => panic!("expected PunchHoleResponse, got {:?}", other),
+        }
+    }
+
     // --- Network partition / unreachable server tests (rsh-a3o) ---
 
     fn make_client(servers: Vec<String>, local_id: &str) -> Client {
