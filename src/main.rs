@@ -2666,6 +2666,32 @@ async fn run_server_mode_inner(
         let user_config = rsh_core::config::Config::load();
         let rdv_servers = user_config.get_rendezvous_servers();
         let device_id = user_config.device_id.clone().unwrap_or_default();
+        let device_id = if device_id.is_empty() {
+            // Fallback 1: read device_id file from server data dir (legacy Go installs)
+            let file_id = std::fs::read_to_string(data_dir.join("device_id"))
+                .ok()
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            let id = if file_id.is_empty() {
+                // Fallback 2: generate a new 9-digit numeric device ID
+                use rand::Rng;
+                let n: u32 = rand::thread_rng().gen_range(100_000_000..999_999_999);
+                n.to_string()
+            } else {
+                file_id
+            };
+            // Persist to config so it's stable across restarts
+            let mut cfg = rsh_core::config::Config::load();
+            cfg.device_id = Some(id.clone());
+            if let Err(e) = cfg.save() {
+                tracing::warn!("could not save device_id to config: {}", e);
+            } else {
+                tracing::info!("generated and saved DeviceID {}", id);
+            }
+            id
+        } else {
+            device_id
+        };
         let rdv_key = user_config.rendezvous_key.clone().unwrap_or_default();
         // Compute group_hash from enrollment_token (if present in config).
         let group_hash = if let Some(ref token) = user_config.enrollment_token {

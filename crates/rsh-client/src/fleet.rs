@@ -36,23 +36,34 @@ const MAX_CONCURRENT: usize = 10;
 /// Probe timeout per host.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Max age (seconds) for hbbs registration to count as "online".
+/// Peers register every 30s, so 90s = 3 missed heartbeats.
+const HBBS_ONLINE_THRESHOLD_SECS: u64 = 90;
+
 /// Get status of all fleet hosts.
 ///
 /// Merges two sources:
-/// 1. Config hosts (local `~/.rsh/config` Host blocks) — user-defined aliases/overrides
-/// 2. hbbs peers (dynamic, via `ListPeers` query) — all registered peers
+/// 1. Config hosts (local `~/.rsh/config` Host blocks) — probed via TCP, enriched with hbbs
+/// 2. hbbs peers (dynamic, via `ListPeers` query) — online status from registration freshness
 ///
 /// Config hosts take precedence: if a config host's DeviceID matches an hbbs peer,
 /// the config entry is used (with its alias name and hostname override).
-/// hbbs peers not covered by config are added as dynamic entries.
+/// If TCP probe fails but hbbs says the peer registered recently, it's marked online via "hbbs".
+/// hbbs peers not covered by config use registration freshness (no TCP probe needed).
 pub async fn status(config: &Config) -> Vec<HostStatus> {
-    // Collect config hosts
     let config_hosts: Vec<&HostConfig> = config.hosts.iter().collect();
 
     // Query hbbs for dynamic peers (best-effort, non-blocking)
     let hbbs_peers = discover_from_hbbs(config).await;
 
-    // Build the probe list: config hosts + any hbbs peers not already in config
+    // Index hbbs peers by device_id for fast lookup
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let hbbs_map: std::collections::HashMap<String, &rsh_relay::rendezvous::GroupPeerInfo> =
+        hbbs_peers.iter().map(|p| (p.device_id.clone(), p)).collect();
+
     let config_device_ids: std::collections::HashSet<String> = config_hosts
         .iter()
         .filter_map(|h| h.device_id.clone())
@@ -61,7 +72,7 @@ pub async fn status(config: &Config) -> Vec<HostStatus> {
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
     let mut handles = Vec::new();
 
-    // Probe config hosts
+    // Probe config hosts (TCP), with hbbs fallback info
     for host in &config_hosts {
         let sem = semaphore.clone();
         let name = host.pattern.clone();
@@ -75,18 +86,30 @@ pub async fn status(config: &Config) -> Vec<HostStatus> {
         let rdv_key = config.rendezvous_key.clone();
         let quic_port = host.quic_port;
 
+        // Check if hbbs knows this peer is recently active
+        let hbbs_online = device_id.as_ref()
+            .and_then(|did| hbbs_map.get(did))
+            .map(|p| now_secs.saturating_sub(p.last_seen_secs) < HBBS_ONLINE_THRESHOLD_SECS)
+            .unwrap_or(false);
+
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.ok();
-            probe_host(&name, &hostname, port, device_id, rdv_server, rdv_key, quic_port).await
+            let mut result = probe_host(&name, &hostname, port, device_id, rdv_server, rdv_key, quic_port).await;
+            // If probe failed but hbbs says online, trust hbbs
+            if !result.online && hbbs_online {
+                result.online = true;
+                result.transport = "hbbs";
+                result.error = None;
+            }
+            result
         }));
     }
 
-    // Probe hbbs peers not already in config (by DeviceID match)
+    // hbbs peers not in config — use registration freshness, no TCP probe
     for peer in &hbbs_peers {
         if config_device_ids.contains(&peer.device_id) {
             continue; // config host takes precedence
         }
-        let sem = semaphore.clone();
         let name = if peer.hostname.is_empty() {
             peer.device_id.clone()
         } else {
@@ -95,14 +118,27 @@ pub async fn status(config: &Config) -> Vec<HostStatus> {
         let hostname = peer.addr
             .map(|a| a.ip().to_string())
             .unwrap_or_else(|| name.clone());
+        let port = if peer.service_port > 0 { peer.service_port } else { 8822 };
+        let online = now_secs.saturating_sub(peer.last_seen_secs) < HBBS_ONLINE_THRESHOLD_SECS;
         let device_id = Some(peer.device_id.clone());
         let rdv_server = config.rendezvous_server.clone();
         let rdv_key = config.rendezvous_key.clone();
-        let port = if peer.service_port > 0 { peer.service_port } else { 8822 };
-
         handles.push(tokio::spawn(async move {
-            let _permit = sem.acquire().await.ok();
-            probe_host(&name, &hostname, port, device_id, rdv_server, rdv_key, None).await
+            HostStatus {
+                name,
+                hostname,
+                port,
+                online,
+                version: None,
+                caps: Vec::new(),
+                latency_ms: 0,
+                error: if online { None } else { Some("not registered".to_string()) },
+                device_id,
+                rendezvous_server: rdv_server,
+                rendezvous_key: rdv_key,
+                quic_port: None,
+                transport: if online { "hbbs" } else { "none" },
+            }
         }));
     }
 
