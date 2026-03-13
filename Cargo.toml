@@ -109,7 +109,7 @@ libc = "0.2"
 nix = { version = "0.29", features = ["signal"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61", features = ["Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.61", features = ["Win32_System_Console", "Win32_UI_WindowsAndMessaging", "Win32_Storage_FileSystem"] }
 
 [features]
 quic = ["rsh-server/quic", "rsh-client/quic", "quinn"]

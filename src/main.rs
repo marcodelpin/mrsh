@@ -130,7 +130,7 @@ struct Cli {
 
 /// Known local subcommands that don't require -h (used in server mode detection).
 #[cfg(target_os = "windows")]
-const LOCAL_COMMANDS: &[&str] = &["version", "fleet", "wake", "config-edit", "connect", "log", "logs", "dashboard", "keygen", "totp-setup", "totp-verify", "install-pack", "relay", "rendezvous"];
+const LOCAL_COMMANDS: &[&str] = &["version", "fleet", "wake", "cfg", "config-edit", "connect", "log", "logs", "dash", "dashboard", "keygen", "totp-setup", "totp-verify", "pack", "install-pack", "relay", "rdv", "rendezvous"];
 
 /// Returns the effective operation timeout in seconds.
 /// Explicit `--timeout N` (N > 0) overrides everything.
@@ -153,6 +153,10 @@ fn main() -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         let is_tray_mode = std::env::args().any(|a| a == "--tray");
+        // TUI commands need a visible, fully functional console
+        let is_tui_cmd = std::env::args().any(|a| {
+            matches!(a.as_str(), "dash" | "dashboard" | "logs" | "cfg" | "config-edit" | "browse" | "sftp" | "connect")
+        });
         if !is_tray_mode {
             unsafe {
                 use windows::Win32::System::Console::{
@@ -162,10 +166,40 @@ fn main() -> Result<()> {
                 use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
                 if AttachConsole(ATTACH_PARENT_PROCESS).is_err() {
                     if AllocConsole().is_ok() {
-                        let hwnd = GetConsoleWindow();
-                        if !hwnd.is_invalid() {
-                            let _ = ShowWindow(hwnd, SW_HIDE);
+                        // TUI commands need a visible console; other commands hide it
+                        if !is_tui_cmd {
+                            let hwnd = GetConsoleWindow();
+                            if !hwnd.is_invalid() {
+                                let _ = ShowWindow(hwnd, SW_HIDE);
+                            }
                         }
+                    }
+                }
+                // After attach/alloc, reopen std handles so Rust's stdin/stdout
+                // point to the (re)attached console — required for crossterm TUI.
+                if is_tui_cmd {
+                    use windows::Win32::Storage::FileSystem::{
+                        CreateFileW, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+                        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+                    };
+                    use windows::Win32::System::Console::{
+                        SetStdHandle, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+                        STD_ERROR_HANDLE,
+                    };
+                    use windows::core::w;
+                    // Reopen CONIN$/CONOUT$ to get fresh handles to the console
+                    if let Ok(h) = CreateFileW(
+                        w!("CONIN$"), FILE_GENERIC_READ.0,
+                        FILE_SHARE_READ, None, OPEN_EXISTING, Default::default(), None,
+                    ) {
+                        let _ = SetStdHandle(STD_INPUT_HANDLE, h);
+                    }
+                    if let Ok(h) = CreateFileW(
+                        w!("CONOUT$"), FILE_GENERIC_WRITE.0,
+                        FILE_SHARE_WRITE, None, OPEN_EXISTING, Default::default(), None,
+                    ) {
+                        let _ = SetStdHandle(STD_OUTPUT_HANDLE, h);
+                        let _ = SetStdHandle(STD_ERROR_HANDLE, h);
                     }
                 }
             }
@@ -281,8 +315,8 @@ fn main() -> Result<()> {
         // Auto-detect service mode:
         // If no -h and no local subcommand → try SCM dispatch first.
         // If SCM dispatch fails → fall through to tray mode.
-        let is_local_cmd = cli.args.first().map_or(false, |a| {
-            LOCAL_COMMANDS.contains(&a.as_str()) || a == "help" || a == "recording" || a == "config-edit"
+        let is_local_cmd = cli.args.first().map_or(true, |a| {
+            LOCAL_COMMANDS.contains(&a.as_str()) || a == "help" || a == "recording"
         });
         if cli.host.is_none() && !is_local_cmd {
             // Try service mode — service_dispatcher::start() blocks if SCM launched us,
@@ -401,7 +435,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
             return run_totp_verify(&args[1], &args[2]);
         }
-        "config-edit" => {
+        "cfg" | "config-edit" => {
             rsh_client::config_tui::run_config_tui()?;
             return Ok(());
         }
@@ -433,17 +467,17 @@ async fn async_main(cli: Cli) -> Result<()> {
             rsh_client::log_viewer::run_log_viewer()?;
             return Ok(());
         }
-        "dashboard" => {
+        "dash" | "dashboard" => {
             rsh_client::dashboard::run_dashboard().await?;
             return Ok(());
         }
-        "install-pack" => {
+        "pack" | "install-pack" => {
             return run_install_pack(&args[1..]);
         }
         "relay" => {
             return run_relay_server(&args[1..]).await;
         }
-        "rendezvous" => {
+        "rdv" | "rendezvous" => {
             return run_rendezvous_server(&args[1..]).await;
         }
         _ => {}
@@ -679,7 +713,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                 )).await?;
                 println!("{}", output);
             }
-            "screenshot" => {
+            "ss" | "screenshot" => {
                 let display: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
                 let quality: u8 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(75);
                 // Use PowerShell .NET to capture screen and return base64
@@ -2778,18 +2812,18 @@ LOCAL COMMANDS (no -h needed):
                   Uses enrollment token HMAC for authentication.
                   Returns: DeviceID, hostname, platform, LAN status
   wake <host|mac>  Send Wake-on-LAN packet (MAC from config or argument)
-  config-edit   Interactive config editor (TUI)
+  cfg           Interactive config editor (TUI)
   connect       Pick a known host from TUI list and connect
   log           Session log report (hours per host)
                   --host=X  --since=YYYY-MM-DD  --until=YYYY-MM-DD
                   --detail  --json
   logs          Interactive log viewer (TUI) — browse, filter, summarize
-  dashboard     Fleet dashboard (TUI) — live host status, auto-refresh
+  dash          Fleet dashboard (TUI) — live host status, auto-refresh
   keygen [path] Generate ed25519 key pair
   totp-setup [fp] Generate TOTP secret + recovery codes for a key
   totp-verify <secret|fp> <code>  Verify a TOTP code
   recording export <file.log> [output.cast]  Convert session log to asciicast
-  install-pack  Generate single-file installer for target machine
+  pack          Generate single-file installer for target machine
                   Linux:   self-extracting .sh (bash header + tar.gz)
                   Windows: NSIS installer .exe (requires makensis on build host)
                   --platform=windows|linux  --output=FILE  --binary=PATH
@@ -2799,7 +2833,7 @@ LOCAL COMMANDS (no -h needed):
                   installed server registers with SHA256(token) as group_hash.
   relay         Run relay server (hbbr) for connection pairing
                   --port=PORT (default: 21117)  --key=KEY
-  rendezvous    Run rendezvous server (hbbs) for device discovery
+  rdv           Run rendezvous server (hbbs) for device discovery
                   --port=PORT (default: 21116)  --key=KEY  --relay=HOST:PORT
                   Stores peer group_hash for fleet group discovery.
   help          This help
@@ -2827,7 +2861,7 @@ TRANSFER OPTIONS:
   ls [path]     List directory
   cat <path>    Read file
   write <r> <c> Write content to file
-  screenshot    Capture screen
+  ss            Capture screen (alias: screenshot)
   watch <l> <r> Watch dir, auto-push changes
   status [n]    RTT statistics (n pings)
   ps            List processes
