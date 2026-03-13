@@ -312,6 +312,20 @@ fn main() -> Result<()> {
     // blocks the main thread and spawns service_main on a new thread.
     #[cfg(target_os = "windows")]
     {
+        // Explicit --service flag: SCM launched us with this flag, go straight to dispatch.
+        if cli.service {
+            let port = cli.port.unwrap_or(8822);
+            rsh_server::service::run_as_service(move |cancel| {
+                let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
+                rt.block_on(async {
+                    if let Err(e) = run_server_mode_with_cancel(port, cancel).await {
+                        tracing::error!("server error: {}", e);
+                    }
+                });
+            })?;
+            return Ok(());
+        }
+
         // Auto-detect service mode:
         // If no -h and no local subcommand → try SCM dispatch first.
         // If SCM dispatch fails → fall through to tray mode.
@@ -319,8 +333,6 @@ fn main() -> Result<()> {
             LOCAL_COMMANDS.contains(&a.as_str()) || a == "help" || a == "recording"
         });
         if cli.host.is_none() && !is_local_cmd {
-            // Try service mode — service_dispatcher::start() blocks if SCM launched us,
-            // returns error immediately if we're not a service.
             let port = cli.port.unwrap_or(8822);
             let result = rsh_server::service::run_as_service(move |cancel| {
                 let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
