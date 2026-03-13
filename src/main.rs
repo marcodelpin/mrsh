@@ -2173,8 +2173,9 @@ async fn run_fleet(args: &[String]) -> Result<()> {
 
     match action {
         "status" => {
+            let verbose = args.iter().any(|a| a == "-v" || a == "--verbose");
             let statuses = rsh_client::fleet::status(&config).await;
-            println!("{}", rsh_client::fleet::format_status_table(&statuses));
+            println!("{}", rsh_client::fleet::format_status_table_inner(&statuses, verbose));
         }
         "update" => {
             let binary_path = args.get(1).map(|s| s.as_str()).unwrap_or("deploy/rsh.exe");
@@ -2575,6 +2576,55 @@ async fn run_server_mode_with_cancel(
     run_server_mode_inner(port, false, cancel).await
 }
 
+/// Build the list of capabilities this server supports.
+/// Advertised to clients during auth handshake so they know what commands are available.
+fn build_server_caps() -> Vec<String> {
+    let mut caps = vec![
+        "exec".to_string(),
+        "push".to_string(),
+        "pull".to_string(),
+        "self-update".to_string(),
+        "bin-patch".to_string(),
+        "info".to_string(),
+        "ps".to_string(),
+        "kill".to_string(),
+        "ls".to_string(),
+        "cat".to_string(),
+        "tail".to_string(),
+        "clip".to_string(),
+        "screenshot".to_string(),
+    ];
+
+    #[cfg(windows)]
+    {
+        caps.extend([
+            "shell".to_string(),
+            "session".to_string(),
+            "recording".to_string(),
+            "mouse".to_string(),
+            "keyboard".to_string(),
+            "window".to_string(),
+            "service".to_string(),
+            "reboot".to_string(),
+            "shutdown".to_string(),
+            "sleep".to_string(),
+            "lock".to_string(),
+        ]);
+    }
+
+    #[cfg(not(windows))]
+    {
+        caps.push("shell".to_string());
+        caps.push("reboot".to_string());
+        caps.push("shutdown".to_string());
+    }
+
+    #[cfg(feature = "quic")]
+    caps.push("quic".to_string());
+
+    caps
+}
+
 async fn run_server_mode_inner(
     port: u16,
     _with_tray: bool,
@@ -2613,11 +2663,7 @@ async fn run_server_mode_inner(
         std::collections::HashSet::new()
     };
 
-    let caps = vec![
-        "shell".to_string(),
-        "self-update".to_string(),
-        "bin-patch".to_string(),
-    ];
+    let caps = build_server_caps();
 
     // Load TOTP secrets (optional — empty vec if file doesn't exist)
     let totp_path = data_dir.join("totp_secrets");

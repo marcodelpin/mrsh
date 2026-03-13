@@ -351,16 +351,29 @@ pub fn hosts_with_cap<'a>(statuses: &'a [HostStatus], cap: &str) -> Vec<&'a Host
 
 /// Format fleet status as a table string.
 pub fn format_status_table(statuses: &[HostStatus]) -> String {
+    format_status_table_inner(statuses, false)
+}
+
+/// Format fleet status table. If `show_caps` is true, include a CAPS column.
+pub fn format_status_table_inner(statuses: &[HostStatus], show_caps: bool) -> String {
     if statuses.is_empty() {
         return "No hosts configured.".to_string();
     }
 
     let mut lines = Vec::new();
-    lines.push(format!(
-        "{:<20} {:<6} {:<10} {:<12} {:<8}",
-        "HOST", "PORT", "STATUS", "VERSION", "LATENCY"
-    ));
-    lines.push("-".repeat(60));
+    if show_caps {
+        lines.push(format!(
+            "{:<20} {:<6} {:<10} {:<12} {:<8} {}",
+            "HOST", "PORT", "STATUS", "VERSION", "LATENCY", "CAPS"
+        ));
+        lines.push("-".repeat(100));
+    } else {
+        lines.push(format!(
+            "{:<20} {:<6} {:<10} {:<12} {:<8}",
+            "HOST", "PORT", "STATUS", "VERSION", "LATENCY"
+        ));
+        lines.push("-".repeat(60));
+    }
 
     for s in statuses {
         let status = if s.online { "online" } else { "offline" };
@@ -370,10 +383,22 @@ pub fn format_status_table(statuses: &[HostStatus]) -> String {
         } else {
             "-".to_string()
         };
-        lines.push(format!(
-            "{:<20} {:<6} {:<10} {:<12} {:<8}",
-            s.name, s.port, status, version, latency
-        ));
+        if show_caps {
+            let caps = if s.caps.is_empty() {
+                "-".to_string()
+            } else {
+                s.caps.join(",")
+            };
+            lines.push(format!(
+                "{:<20} {:<6} {:<10} {:<12} {:<8} {}",
+                s.name, s.port, status, version, latency, caps
+            ));
+        } else {
+            lines.push(format!(
+                "{:<20} {:<6} {:<10} {:<12} {:<8}",
+                s.name, s.port, status, version, latency
+            ));
+        }
     }
 
     lines.join("\n")
