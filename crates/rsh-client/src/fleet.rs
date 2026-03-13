@@ -894,4 +894,32 @@ mod tests {
         assert!(s.rendezvous_server.is_none());
         assert!(s.rendezvous_key.is_none());
     }
+
+    #[test]
+    fn format_status_table_verbose_shows_caps() {
+        let mut s = mock_status("myhost", true, Some("1.2.0"));
+        s.caps = vec!["exec".to_string(), "shell".to_string(), "push".to_string()];
+        let table = format_status_table_inner(&[s], true);
+        assert!(table.contains("CAPS"), "verbose table must have CAPS header");
+        assert!(table.contains("exec,shell,push"), "caps should be comma-separated");
+    }
+
+    #[test]
+    fn format_status_table_verbose_empty_caps_shows_dash() {
+        let mut s = mock_status("no-caps-host", true, Some("1.0.0"));
+        s.caps = Vec::new();
+        let table = format_status_table_inner(&[s], true);
+        assert!(table.contains("CAPS"));
+        let lines: Vec<&str> = table.lines().collect();
+        let host_line = lines.iter().find(|l| l.contains("no-caps-host")).unwrap();
+        assert!(host_line.trim().ends_with('-'), "empty caps should show '-', got: {}", host_line);
+    }
+
+    #[test]
+    fn format_status_table_non_verbose_hides_caps() {
+        let mut s = mock_status("myhost", true, Some("1.2.0"));
+        s.caps = vec!["exec".to_string()];
+        let table = format_status_table_inner(&[s], false);
+        assert!(!table.contains("CAPS"), "non-verbose table must not have CAPS column");
+    }
 }

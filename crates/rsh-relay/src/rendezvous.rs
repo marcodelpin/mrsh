@@ -2147,4 +2147,61 @@ mod tests {
         let resp = srv.handle_message(msg, src, &peers);
         assert!(resp.is_none(), "bad key should be rejected");
     }
+
+    #[tokio::test]
+    async fn rdv_service_port_round_trip() {
+        let srv = RendezvousServer::new("key", "relay.test:21117");
+        let peers: Arc<std::sync::Mutex<HashMap<String, PeerEntry>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+        // Register peer with non-default service_port
+        let reg = proto::RendezvousMessage {
+            union: Some(proto::rendezvous_message::Union::RegisterPeer(
+                proto::RegisterPeer {
+                    id: "test-9822".to_string(),
+                    serial: 0,
+                    group_hash: String::new(),
+                    hostname: "CUSTOM-PORT".to_string(),
+                    platform: "windows".to_string(),
+                    service_port: 9822,
+                },
+            )),
+        };
+        let src: SocketAddr = "10.0.0.5:12345".parse().unwrap();
+        let _resp = srv.handle_message(reg, src, &peers);
+
+        // Also register one with default port (0)
+        let reg2 = proto::RendezvousMessage {
+            union: Some(proto::rendezvous_message::Union::RegisterPeer(
+                proto::RegisterPeer {
+                    id: "test-default".to_string(),
+                    serial: 0,
+                    group_hash: String::new(),
+                    hostname: "DEFAULT-PORT".to_string(),
+                    platform: "linux".to_string(),
+                    service_port: 0,
+                },
+            )),
+        };
+        let _resp2 = srv.handle_message(reg2, "10.0.0.6:12345".parse().unwrap(), &peers);
+
+        // Query via ListPeers
+        let lp = proto::RendezvousMessage {
+            union: Some(proto::rendezvous_message::Union::ListPeers(
+                proto::ListPeers { licence_key: "key".to_string() },
+            )),
+        };
+        let resp = srv.handle_message(lp, "127.0.0.1:9999".parse().unwrap(), &peers).unwrap();
+        match resp.union {
+            Some(proto::rendezvous_message::Union::ListPeersResponse(lpr)) => {
+                let custom = lpr.peers.iter().find(|p| p.device_id == "test-9822").unwrap();
+                assert_eq!(custom.service_port, 9822, "custom port must survive round-trip");
+                assert_eq!(custom.hostname, "CUSTOM-PORT");
+
+                let default = lpr.peers.iter().find(|p| p.device_id == "test-default").unwrap();
+                assert_eq!(default.service_port, 0, "default port=0 must survive round-trip");
+            }
+            other => panic!("expected ListPeersResponse, got {:?}", other),
+        }
+    }
 }

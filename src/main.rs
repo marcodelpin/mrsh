@@ -3322,4 +3322,45 @@ mod tests {
         ).await;
         assert_eq!(result.unwrap(), 42);
     }
+
+    // --- build_server_caps ---
+
+    #[test]
+    fn caps_contains_common_capabilities() {
+        let caps = build_server_caps();
+        for expected in &["exec", "push", "pull", "self-update", "info", "ps", "kill", "ls", "cat", "tail", "clip", "screenshot"] {
+            assert!(caps.iter().any(|c| c == expected), "missing common cap: {}", expected);
+        }
+    }
+
+    #[test]
+    fn caps_contains_shell_on_all_platforms() {
+        let caps = build_server_caps();
+        assert!(caps.contains(&"shell".to_string()), "shell must be in caps on all platforms");
+    }
+
+    #[test]
+    fn caps_contains_reboot_shutdown_on_all_platforms() {
+        let caps = build_server_caps();
+        assert!(caps.contains(&"reboot".to_string()));
+        assert!(caps.contains(&"shutdown".to_string()));
+    }
+
+    #[test]
+    fn caps_no_duplicates() {
+        let caps = build_server_caps();
+        let mut seen = std::collections::HashSet::new();
+        for cap in &caps {
+            assert!(seen.insert(cap), "duplicate cap: {}", cap);
+        }
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn caps_linux_excludes_windows_only() {
+        let caps = build_server_caps();
+        for win_only in &["mouse", "keyboard", "window", "service", "session", "recording", "sleep", "lock"] {
+            assert!(!caps.iter().any(|c| c == win_only), "Linux caps should not contain {}", win_only);
+        }
+    }
 }
