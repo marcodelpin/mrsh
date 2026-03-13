@@ -130,7 +130,7 @@ struct Cli {
 
 /// Known local subcommands that don't require -h (used in server mode detection).
 #[cfg(target_os = "windows")]
-const LOCAL_COMMANDS: &[&str] = &["version", "fleet", "wake", "cfg", "config-edit", "connect", "log", "logs", "dash", "dashboard", "keygen", "totp-setup", "totp-verify", "pack", "install-pack", "relay", "rdv", "rendezvous"];
+const LOCAL_COMMANDS: &[&str] = &["version", "fleet", "wake", "cfg", "config-edit", "connect", "log", "logs", "dash", "dashboard", "keygen", "totp-setup", "totp-verify", "pack", "install-pack", "relay", "rdv", "rendezvous", "discover"];
 
 /// Returns the effective operation timeout in seconds.
 /// Explicit `--timeout N` (N > 0) overrides everything.
@@ -384,6 +384,32 @@ async fn async_main(cli: Cli) -> Result<()> {
         }
         "fleet" => {
             return run_fleet(&args[1..]).await;
+        }
+        "discover" => {
+            let timeout_secs: u64 = args.get(1)
+                .and_then(|s| s.strip_prefix("--timeout=").or(Some(s.as_str())))
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3);
+            let config = rsh_core::config::Config::load();
+            let local_id = config.device_id.clone().unwrap_or_default();
+            eprintln!("Scanning LAN for rsh peers ({timeout_secs}s)...");
+            let peers = rsh_relay::discovery::discover_lan(
+                rsh_relay::discovery::DISCOVERY_PORT,
+                std::time::Duration::from_secs(timeout_secs),
+                &local_id,
+            ).await;
+            if peers.is_empty() {
+                println!("No peers found.");
+            } else {
+                println!("{:<20} {:<16} {:<10} {:<6}", "HOSTNAME", "IP", "PLATFORM", "PORT");
+                println!("{}", "-".repeat(54));
+                for p in &peers {
+                    let port = if p.service_port > 0 { p.service_port.to_string() } else { "-".to_string() };
+                    println!("{:<20} {:<16} {:<10} {:<6}", p.hostname, p.addr.ip(), p.platform, port);
+                }
+                println!("\nFound {} peer(s)", peers.len());
+            }
+            return Ok(());
         }
         "wake" => {
             if args.len() < 2 {
@@ -2756,6 +2782,21 @@ async fn run_server_mode_inner(
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
         let platform = std::env::consts::OS.to_string();
+
+        // Spawn LAN discovery responder (non-fatal if port busy).
+        {
+            let cancel_disc = cancel.clone();
+            let disc_id = device_id.clone();
+            let disc_host = hostname.clone();
+            let disc_platform = platform.clone();
+            let disc_port = port;
+            tokio::spawn(async move {
+                rsh_relay::discovery::run_discovery_responder(
+                    cancel_disc, disc_id, disc_host, disc_platform, disc_port,
+                ).await;
+            });
+        }
+
         if !rdv_servers.is_empty() && !device_id.is_empty() {
             let (relay_tx, mut relay_rx) =
                 tokio::sync::mpsc::channel::<rsh_relay::rendezvous::RelayNotification>(16);
