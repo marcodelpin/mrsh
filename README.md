@@ -53,7 +53,7 @@ SSH is great, but it wasn't designed for modern fleet management. **rsh** is bui
 ### Client (Linux/macOS/Windows)
 
 ```bash
-# Test connection
+# Test connection (auto-tries ports 8822, 9822, 22)
 rsh -h 192.168.1.100 ping
 
 # Interactive shell
@@ -73,7 +73,7 @@ rsh -h 192.168.1.100 pull C:\logs\app.log ./local/
 
 ```powershell
 # Install as Windows service
-.\rsh.exe -install
+.\rsh.exe --install
 net start rsh
 
 # Or run as tray icon
@@ -327,10 +327,12 @@ RendezvousServer rdv.example.com:21116
 # Per-host settings
 Host myserver
     Hostname 192.168.1.100
-    Port 8822
+    Port 8822                 # Explicit port (skips auto-try)
     MAC aa:bb:cc:dd:ee:ff    # For Wake-on-LAN
     DeviceID 118855822        # For relay connections
 ```
+
+**Port resolution order**: (1) explicit `-p` flag, (2) config `Port` field, (3) auto-try 8822 → 9822 → 22 with 3s timeout per port.
 
 ### Server Configuration
 
@@ -349,7 +351,7 @@ C:\ProgramData\remote-shell\
 
 ## Building
 
-Requires Rust 1.75+ and `x86_64-pc-windows-gnu` target for cross-compilation.
+Requires Rust 1.85+ (edition 2024) and `x86_64-pc-windows-gnu` target for cross-compilation.
 
 ```bash
 # Linux client
@@ -406,7 +408,7 @@ rsh (workspace root)
 
 ### Wire Protocol
 
-- **Command port** (default 8822): Length-prefixed binary framing (4-byte BE header) over TLS
+- **Command port** (default 8822, auto-tries 8822 → 9822 → 22 when `-p` omitted): Length-prefixed binary framing (4-byte BE header) over TLS
 - **Stream port** (command port + 1): JSON + raw streams for push/pull
 - **SSH detection**: First byte peek &mdash; `0x16` routes to TLS, `0x53` routes to SSH handler
 - **Multiplexing**: Multiple logical channels over single TLS connection
@@ -463,7 +465,7 @@ rsh includes several measures to prevent misuse as a covert remote access tool:
 
 | Measure | Description |
 |---------|-------------|
-| **Mandatory tray icon** | Service installation (`-install`) registers a logon task that launches the tray companion at every user login. Users always see a system tray icon indicating rsh is active. |
+| **Mandatory tray icon** | Service installation (`--install`) registers a logon task that launches the tray companion at every user login. Users always see a system tray icon indicating rsh is active. |
 | **Connection toast notifications** | When a client authenticates, the tray icon displays a Windows balloon notification showing the client IP and key comment. Every remote connection has user-visible evidence. |
 | **Failed auth rate limiting** | IPs that fail authentication 5 times within 60 seconds are banned for 5 minutes. Prevents brute-force key guessing. |
 | **Exec safety guards** | Server blocks commands that would kill/stop/delete the rsh process (see table above). Prevents both accidental and deliberate self-destruction. |

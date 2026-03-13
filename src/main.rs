@@ -2536,7 +2536,7 @@ USAGE:
 
 OPTIONS:
   -h <host>     Remote host (IP, hostname, or DeviceID)
-  -p <port>     Remote port (default: 8822)
+  -p <port>     Remote port (omit to auto-try: 8822 → 9822 → 22)
   -i <key>      SSH key file
   -v, -vv       Verbose output
 
