@@ -44,8 +44,9 @@ SSH is great, but it wasn't designed for modern fleet management. **rsh** is bui
 | **GUI** | Mouse control, keyboard input, window management, screen capture (MJPEG), multi-display, remote UI test automation |
 | **System** | `reboot`, `shutdown`, `sleep`, `lock`, `wake` (WoL), `info`, `service` management, `ps`/`kill` |
 | **Server** | Windows service (SCM), system tray with notifications, console mode, auto-tray launch (WTS), DLL plugins |
-| **Fleet** | Multi-host commands, rendezvous relay, auto-discovery, self-update, fleet enrollment, `install-pack` (NSIS) |
-| **Config** | SSH-style config file, Ratatui TUI editor, TUI host picker (fuzzy search), `--log-file` |
+| **Fleet** | Multi-host status, rendezvous relay, hbbs peer discovery, self-update, fleet enrollment, `install-pack` (NSIS) |
+| **Dashboard** | TUI fleet dashboard (`rsh dash`), TUI log viewer (`rsh log`), real-time status with action menu |
+| **Config** | SSH-style config file, Ratatui TUI editor, TUI host picker (fuzzy search), auto-DeviceID, `--log-file` |
 | **SSH** | Transparent SSH fallback, SFTP, agent forwarding (`-A`), local/reverse port forwarding (`-L`/`-R`) |
 
 ## Quick Start
@@ -239,11 +240,20 @@ rsh -h target -J jumphost:9822 exec "hostname"
 ### Fleet Management
 
 ```bash
-# Execute on multiple hosts
-rsh fleet exec "hostname" --hosts host1,host2,host3
+# Fleet status (probes all configured hosts + hbbs-discovered peers)
+rsh fleet status
 
-# Update all hosts
-rsh fleet update --hosts host1,host2,host3
+# Interactive TUI dashboard (live refresh, Enter for action menu)
+rsh dash
+
+# TUI log viewer (filter, search, tail mode)
+rsh log
+
+# Update all outdated hosts (push binary + self-update)
+rsh fleet update
+
+# Discover peers enrolled in a group
+rsh fleet discover --group myteam
 
 # Create installer package with pre-configured connection
 rsh install-pack --server 192.168.1.100 --key ~/.ssh/id_ed25519.pub -o installer.exe
@@ -499,6 +509,8 @@ rsh stands on the shoulders of these projects and ideas:
 
 - **GUI automation is Windows-only** — ConPTY shell, service SCM, tray icon, mouse/keyboard/window control require Windows. Server daemon mode (exec, file transfer, relay) works on all platforms
 - **QUIC transport** — server + client behind `--features quic`; supports `ping` and `exec` over QUIC (`rsh --quic -h host exec 'cmd'`)
+- **No server-side capability negotiation** — clients don't know which commands a server supports until they try. Fleet status shows version but not available features
+- **Go→Rust migration** — self-update on old Go rsh machines breaks the Windows service (single-dash vs double-dash CLI flags). Manual service reinstall required
 
 ## License
 
