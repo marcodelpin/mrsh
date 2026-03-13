@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use clap::Parser;
 use rsh_client::client::ConnectOptions;
 use tracing::info;
@@ -2635,6 +2635,10 @@ async fn run_server_mode_inner(
         totp_recovery_path,
     });
 
+    // Clone TLS acceptor and ctx for relay handler before moving into ServerConfig.
+    let relay_tls_acceptor = tls_acceptor.clone();
+    let relay_ctx = ctx.clone();
+
     let config = listener::ServerConfig {
         command_port: port,
         tls_acceptor,
@@ -2644,7 +2648,7 @@ async fn run_server_mode_inner(
         tls_config: tls_config_for_quic,
     };
 
-    // Spawn rendezvous registration loop (if configured).
+    // Spawn rendezvous registration loop with relay notification support.
     {
         let user_config = rsh_core::config::Config::load();
         let rdv_servers = user_config.get_rendezvous_servers();
@@ -2668,30 +2672,41 @@ async fn run_server_mode_inner(
             .unwrap_or_default();
         let platform = std::env::consts::OS.to_string();
         if !rdv_servers.is_empty() && !device_id.is_empty() {
-            let cancel = cancel.clone();
+            let (relay_tx, mut relay_rx) =
+                tokio::sync::mpsc::channel::<rsh_relay::rendezvous::RelayNotification>(16);
+
+            // Registration + relay notification listener.
+            let cancel_reg = cancel.clone();
             tokio::spawn(async move {
                 let client = rsh_relay::rendezvous::Client {
                     servers: rdv_servers,
-                    licence_key: rdv_key,
-                    local_id: device_id.clone(),
-                    group_hash: group_hash.clone(),
+                    licence_key: rdv_key.clone(),
+                    local_id: device_id,
+                    group_hash,
                     hostname,
                     platform,
                 };
-                if !group_hash.is_empty() {
-                    info!("rendezvous registration started for DeviceID {} (group enrolled)", device_id);
-                } else {
-                    info!("rendezvous registration started for DeviceID {}", device_id);
-                }
-                // Register immediately on startup, then every 30s.
+                client.run_registration_loop(cancel_reg, relay_tx).await;
+            });
+
+            // Relay acceptance handler: receives notifications from hbbs and
+            // connects to hbbr to complete the relay pairing.
+            let cancel_relay = cancel.clone();
+            let relay_key = user_config.rendezvous_key.clone().unwrap_or_default();
+            tokio::spawn(async move {
                 loop {
-                    match client.register_once().await {
-                        Ok(()) => tracing::debug!("rendezvous registered"),
-                        Err(e) => tracing::warn!("rendezvous registration failed: {}", e),
-                    }
                     tokio::select! {
-                        _ = cancel.cancelled() => break,
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
+                        _ = cancel_relay.cancelled() => break,
+                        Some(notif) = relay_rx.recv() => {
+                            let acceptor = relay_tls_acceptor.clone();
+                            let ctx = relay_ctx.clone();
+                            let key = relay_key.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = accept_relay_connection(notif, acceptor, ctx, &key).await {
+                                    tracing::warn!("relay accept: {}", e);
+                                }
+                            });
+                        }
                     }
                 }
             });
@@ -2727,6 +2742,49 @@ async fn run_server_mode_inner(
 
     // Service, console, or daemon mode — listener blocks, no tray
     listener::run_server(config, cancel).await?;
+
+    Ok(())
+}
+
+/// Accept an incoming relay connection: connect to hbbr, TLS accept, dispatch.
+///
+/// Called when hbbs sends a RelayResponse notification indicating a client
+/// wants to connect to this server via relay. We connect to hbbr with the
+/// same UUID so hbbr can pair us with the client.
+async fn accept_relay_connection(
+    notif: rsh_relay::rendezvous::RelayNotification,
+    acceptor: tokio_rustls::TlsAcceptor,
+    ctx: Arc<rsh_server::handler::ServerContext>,
+    licence_key: &str,
+) -> Result<()> {
+    let relay_addr = if notif.relay_server.contains(':') {
+        notif.relay_server.clone()
+    } else {
+        format!("{}:21117", notif.relay_server)
+    };
+
+    info!(
+        "relay accept: connecting to hbbr {} uuid={}",
+        relay_addr, notif.uuid
+    );
+
+    let relay_stream = rsh_relay::relay::connect_relay(&relay_addr, &notif.uuid, licence_key)
+        .await
+        .context("relay: connect to hbbr")?;
+
+    tracing::debug!("relay accept: connected, waiting for TLS handshake");
+
+    let tls_stream = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        acceptor.accept(relay_stream),
+    )
+    .await
+    .context("relay: TLS accept timeout")?
+    .context("relay: TLS accept")?;
+
+    info!("relay accept: TLS established, dispatching");
+
+    rsh_server::handler::handle_connection(tls_stream, &ctx, None).await?;
 
     Ok(())
 }

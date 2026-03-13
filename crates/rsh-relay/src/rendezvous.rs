@@ -18,7 +18,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use prost::Message;
 use tokio::io::AsyncWriteExt;
-use tokio::net::UdpSocket;
+use tokio::net::{TcpListener, UdpSocket};
 use tokio::time::{Duration, Instant, timeout};
 
 use crate::codec;
@@ -46,6 +46,15 @@ pub struct GroupPeerInfo {
     pub platform: String,
     pub addr: Option<SocketAddr>,
     pub last_seen_secs: u64,
+}
+
+/// A relay notification received from hbbs: a client wants to connect via relay.
+#[derive(Debug, Clone)]
+pub struct RelayNotification {
+    /// UUID for relay pairing (both sides connect to hbbr with this UUID).
+    pub uuid: String,
+    /// Relay server address (hbbr host:port).
+    pub relay_server: String,
 }
 
 /// Client for hbbs rendezvous protocol.
@@ -229,6 +238,11 @@ impl RendezvousServer {
     }
 
     /// Start the rendezvous server on the given UDP address.
+    ///
+    /// Listens on both UDP (registration, punch-hole, group queries) and TCP
+    /// (RequestRelay forwarding). When a client sends RequestRelay via TCP,
+    /// hbbs looks up the target device and sends RelayResponse via UDP to its
+    /// registered address, enabling server-side relay acceptance.
     pub async fn listen_and_serve(&self, addr: &str) -> Result<()> {
         let sock = Arc::new(UdpSocket::bind(addr).await.context("bind UDP")?);
 
@@ -249,6 +263,40 @@ impl RendezvousServer {
                 if removed > 0 {
                     tracing::debug!("rdv: expired {removed} peers, {} remaining", map.len());
                 }
+            }
+        });
+
+        // Spawn TCP listener for RequestRelay forwarding.
+        // TCP and UDP can share the same port number.
+        let tcp_listener = TcpListener::bind(addr)
+            .await
+            .context("bind TCP for relay forwarding")?;
+        tracing::info!("rdv: TCP relay forwarding on {}", addr);
+
+        let peers_tcp = peers.clone();
+        let sock_tcp = sock.clone();
+        let relay_server = self.relay_server.clone();
+        let key_tcp = self.key.clone();
+        tokio::spawn(async move {
+            loop {
+                let (stream, peer) = match tcp_listener.accept().await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!("rdv tcp accept: {}", e);
+                        continue;
+                    }
+                };
+                let peers = peers_tcp.clone();
+                let sock = sock_tcp.clone();
+                let relay = relay_server.clone();
+                let key = key_tcp.clone();
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        handle_tcp_relay_request(stream, peer, &peers, &sock, &relay, &key).await
+                    {
+                        tracing::debug!("rdv tcp relay from {}: {}", peer, e);
+                    }
+                });
             }
         });
 
@@ -876,6 +924,186 @@ impl Client {
 
         Ok(uuid)
     }
+
+    /// Run a persistent registration loop that also listens for relay notifications.
+    ///
+    /// Unlike `register_once()` which creates ephemeral sockets, this maintains
+    /// a persistent UDP socket so hbbs can send RelayResponse notifications when
+    /// a client requests relay connection to this device.
+    ///
+    /// Relay notifications are sent to `relay_tx`. The caller should spawn a handler
+    /// that connects to hbbr with the UUID and accepts the incoming TLS connection.
+    pub async fn run_registration_loop(
+        &self,
+        cancel: tokio_util::sync::CancellationToken,
+        relay_tx: tokio::sync::mpsc::Sender<RelayNotification>,
+    ) {
+        if self.servers.is_empty() || self.local_id.is_empty() {
+            tracing::warn!("rendezvous loop: no servers or no device_id, not starting");
+            return;
+        }
+
+        let sock = match UdpSocket::bind("0.0.0.0:0").await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("rendezvous loop: bind failed: {}", e);
+                return;
+            }
+        };
+
+        // Resolve server addresses.
+        let mut server_addrs = Vec::new();
+        for srv in &self.servers {
+            match tokio::net::lookup_host(srv).await {
+                Ok(mut addrs) => {
+                    if let Some(addr) = addrs.next() {
+                        server_addrs.push(addr);
+                    }
+                }
+                Err(e) => tracing::warn!("rendezvous loop: resolve {}: {}", srv, e),
+            }
+        }
+
+        if server_addrs.is_empty() {
+            tracing::warn!("rendezvous loop: no servers resolved");
+            return;
+        }
+
+        // Pre-encode the registration message.
+        let reg_msg = proto::RendezvousMessage {
+            union: Some(proto::rendezvous_message::Union::RegisterPeer(
+                proto::RegisterPeer {
+                    id: self.local_id.clone(),
+                    serial: 0,
+                    group_hash: self.group_hash.clone(),
+                    hostname: self.hostname.clone(),
+                    platform: self.platform.clone(),
+                },
+            )),
+        };
+        let reg_bytes = reg_msg.encode_to_vec();
+
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        let mut buf = vec![0u8; 65535];
+
+        if !self.group_hash.is_empty() {
+            tracing::info!(
+                "rendezvous loop: DeviceID {} (group enrolled), listening for relay",
+                self.local_id
+            );
+        } else {
+            tracing::info!(
+                "rendezvous loop: DeviceID {}, listening for relay",
+                self.local_id
+            );
+        }
+
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    tracing::debug!("rendezvous loop: cancelled");
+                    return;
+                }
+                _ = interval.tick() => {
+                    for addr in &server_addrs {
+                        let _ = sock.send_to(&reg_bytes, addr).await;
+                    }
+                }
+                result = sock.recv_from(&mut buf) => {
+                    if let Ok((n, _src)) = result {
+                        if let Ok(msg) = proto::RendezvousMessage::decode(&buf[..n]) {
+                            match msg.union {
+                                Some(proto::rendezvous_message::Union::RegisterPeerResponse(_)) => {
+                                    tracing::debug!("rendezvous: registered");
+                                }
+                                Some(proto::rendezvous_message::Union::RegisterPkResponse(_)) => {
+                                    tracing::debug!("rendezvous: pk registered");
+                                }
+                                Some(proto::rendezvous_message::Union::RelayResponse(rr)) => {
+                                    if !rr.uuid.is_empty() {
+                                        tracing::info!(
+                                            "rendezvous: relay notification uuid={} relay={}",
+                                            rr.uuid, rr.relay_server
+                                        );
+                                        let _ = relay_tx.send(RelayNotification {
+                                            uuid: rr.uuid,
+                                            relay_server: rr.relay_server,
+                                        }).await;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Handle a TCP RequestRelay: look up target device and forward RelayResponse via UDP.
+async fn handle_tcp_relay_request(
+    mut stream: tokio::net::TcpStream,
+    peer: SocketAddr,
+    peers: &std::sync::Mutex<HashMap<String, PeerEntry>>,
+    sock: &UdpSocket,
+    relay_server: &str,
+    key: &str,
+) -> Result<()> {
+    let data = timeout(
+        Duration::from_secs(10),
+        codec::decode_frame(&mut stream),
+    )
+    .await
+    .context("tcp relay read timeout")?
+    .context("tcp relay read")?;
+
+    let msg = proto::RendezvousMessage::decode(&data[..]).context("decode RequestRelay")?;
+
+    if let Some(proto::rendezvous_message::Union::RequestRelay(rr)) = msg.union {
+        // Validate key.
+        if !key.is_empty() && rr.licence_key != key {
+            tracing::debug!("rdv tcp: key mismatch from {}", peer);
+            return Ok(());
+        }
+
+        if rr.uuid.is_empty() {
+            tracing::debug!("rdv tcp: empty UUID from {}", peer);
+            return Ok(());
+        }
+
+        // Look up target device.
+        let target_addr = {
+            let map = peers.lock().unwrap();
+            map.get(&rr.id).map(|e| e.addr)
+        };
+
+        if let Some(addr) = target_addr {
+            let relay = if rr.relay_server.is_empty() {
+                relay_server.to_string()
+            } else {
+                rr.relay_server
+            };
+
+            // Forward RelayResponse to target device via UDP.
+            let response = proto::RendezvousMessage {
+                union: Some(proto::rendezvous_message::Union::RelayResponse(
+                    proto::RelayResponse {
+                        uuid: rr.uuid.clone(),
+                        relay_server: relay,
+                        socket_addr: encode_socket_addr(&peer),
+                        ..Default::default()
+                    },
+                )),
+            };
+            sock.send_to(&response.encode_to_vec(), addr).await?;
+            tracing::info!("rdv: relay {} → {} (uuid={})", rr.id, addr, rr.uuid);
+        } else {
+            tracing::debug!("rdv: relay for {} — not registered", rr.id);
+        }
+    }
+
+    Ok(())
 }
 
 /// Generate a random UUID v4 string.
@@ -1451,5 +1679,268 @@ mod tests {
             Ok(inner) => assert!(inner.is_err(), "register_once must fail when server unreachable"),
             Err(_) => panic!("register_once hung beyond 7 seconds (deadline: 5s per server)"),
         }
+    }
+
+    // --- Relay forwarding tests (beads-u8d) ---
+
+    /// hbbs TCP RequestRelay forwarding: registered device receives RelayResponse via UDP.
+    #[tokio::test]
+    async fn rdv_tcp_relay_forwarding_to_registered_device() {
+        use tokio::io::AsyncReadExt;
+
+        // Start hbbs (UDP + TCP) on random port.
+        let udp_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let srv_addr = udp_sock.local_addr().unwrap();
+        drop(udp_sock);
+
+        let srv = RendezvousServer::new("testkey", &format!("127.0.0.1:{}", srv_addr.port() + 1));
+
+        let srv_handle = tokio::spawn(async move {
+            // Will run until cancelled; we just let it run in background.
+            let _ = srv.listen_and_serve(&srv_addr.to_string()).await;
+        });
+
+        // Give server time to bind.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // "Server" device: register with hbbs and listen for messages on same socket.
+        let device_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let device_addr = device_sock.local_addr().unwrap();
+
+        // Register device "999888777" by sending RegisterPeer.
+        let reg = proto::RendezvousMessage {
+            union: Some(proto::rendezvous_message::Union::RegisterPeer(
+                proto::RegisterPeer {
+                    id: "999888777".to_string(),
+                    serial: 0,
+                    group_hash: String::new(),
+                    hostname: "test-device".to_string(),
+                    platform: "linux".to_string(),
+                },
+            )),
+        };
+        device_sock
+            .send_to(&reg.encode_to_vec(), srv_addr)
+            .await
+            .unwrap();
+
+        // Read RegisterPeerResponse.
+        let mut buf = vec![0u8; 65535];
+        let (n, _) = timeout(Duration::from_secs(3), device_sock.recv_from(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        let resp = proto::RendezvousMessage::decode(&buf[..n]).unwrap();
+        assert!(
+            matches!(
+                resp.union,
+                Some(proto::rendezvous_message::Union::RegisterPeerResponse(_))
+            ),
+            "should get RegisterPeerResponse"
+        );
+
+        // "Client": send RequestRelay via TCP to hbbs for device 999888777.
+        let mut tcp = tokio::net::TcpStream::connect(srv_addr).await.unwrap();
+        let relay_req = proto::RendezvousMessage {
+            union: Some(proto::rendezvous_message::Union::RequestRelay(
+                proto::RequestRelay {
+                    id: "999888777".to_string(),
+                    uuid: "test-uuid-1234".to_string(),
+                    relay_server: "relay.test:21117".to_string(),
+                    licence_key: "testkey".to_string(),
+                    ..Default::default()
+                },
+            )),
+        };
+        let frame = crate::codec::encode_frame(&relay_req.encode_to_vec());
+        use tokio::io::AsyncWriteExt;
+        tcp.write_all(&frame).await.unwrap();
+
+        // The "device" should receive RelayResponse via UDP.
+        let (n, _) = timeout(Duration::from_secs(3), device_sock.recv_from(&mut buf))
+            .await
+            .expect("device should receive RelayResponse within 3s")
+            .unwrap();
+        let notification = proto::RendezvousMessage::decode(&buf[..n]).unwrap();
+        match notification.union {
+            Some(proto::rendezvous_message::Union::RelayResponse(rr)) => {
+                assert_eq!(rr.uuid, "test-uuid-1234");
+                assert_eq!(rr.relay_server, "relay.test:21117");
+            }
+            other => panic!("expected RelayResponse, got {:?}", other),
+        }
+
+        srv_handle.abort();
+    }
+
+    /// hbbs TCP RequestRelay for unregistered device: no crash, no notification.
+    #[tokio::test]
+    async fn rdv_tcp_relay_unregistered_device_no_crash() {
+        let udp_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let srv_addr = udp_sock.local_addr().unwrap();
+        drop(udp_sock);
+
+        let srv = RendezvousServer::new("", "relay.test:21117");
+        let srv_handle = tokio::spawn(async move {
+            let _ = srv.listen_and_serve(&srv_addr.to_string()).await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Send RequestRelay for non-existent device — should not crash.
+        let mut tcp = tokio::net::TcpStream::connect(srv_addr).await.unwrap();
+        let relay_req = proto::RendezvousMessage {
+            union: Some(proto::rendezvous_message::Union::RequestRelay(
+                proto::RequestRelay {
+                    id: "nonexistent".to_string(),
+                    uuid: "test-uuid".to_string(),
+                    ..Default::default()
+                },
+            )),
+        };
+        let frame = crate::codec::encode_frame(&relay_req.encode_to_vec());
+        use tokio::io::AsyncWriteExt;
+        tcp.write_all(&frame).await.unwrap();
+
+        // Give hbbs time to process.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Server should still be alive (try another TCP connection).
+        let tcp2 = tokio::net::TcpStream::connect(srv_addr).await;
+        assert!(tcp2.is_ok(), "hbbs should still accept connections");
+
+        srv_handle.abort();
+    }
+
+    /// hbbs TCP RequestRelay with key mismatch: silently rejected.
+    #[tokio::test]
+    async fn rdv_tcp_relay_key_mismatch_rejected() {
+        let udp_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let srv_addr = udp_sock.local_addr().unwrap();
+        drop(udp_sock);
+
+        let srv = RendezvousServer::new("correctkey", "relay.test:21117");
+        let srv_handle = tokio::spawn(async move {
+            let _ = srv.listen_and_serve(&srv_addr.to_string()).await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Register a device.
+        let device_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let reg = proto::RendezvousMessage {
+            union: Some(proto::rendezvous_message::Union::RegisterPeer(
+                proto::RegisterPeer {
+                    id: "keytestdev".to_string(),
+                    ..Default::default()
+                },
+            )),
+        };
+        device_sock
+            .send_to(&reg.encode_to_vec(), srv_addr)
+            .await
+            .unwrap();
+        let mut buf = vec![0u8; 65535];
+        let _ = timeout(Duration::from_secs(2), device_sock.recv_from(&mut buf))
+            .await
+            .unwrap();
+
+        // Send RequestRelay with wrong key.
+        let mut tcp = tokio::net::TcpStream::connect(srv_addr).await.unwrap();
+        let relay_req = proto::RendezvousMessage {
+            union: Some(proto::rendezvous_message::Union::RequestRelay(
+                proto::RequestRelay {
+                    id: "keytestdev".to_string(),
+                    uuid: "uuid-xyz".to_string(),
+                    licence_key: "wrongkey".to_string(),
+                    ..Default::default()
+                },
+            )),
+        };
+        let frame = crate::codec::encode_frame(&relay_req.encode_to_vec());
+        use tokio::io::AsyncWriteExt;
+        tcp.write_all(&frame).await.unwrap();
+
+        // Device should NOT receive anything (key mismatch → silently rejected).
+        let result = timeout(Duration::from_millis(500), device_sock.recv_from(&mut buf)).await;
+        assert!(result.is_err(), "device should not receive notification on key mismatch");
+
+        srv_handle.abort();
+    }
+
+    /// run_registration_loop receives RelayResponse and forwards to channel.
+    #[tokio::test]
+    async fn registration_loop_receives_relay_notification() {
+        // Start a minimal hbbs.
+        let hbbs_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let hbbs_addr = hbbs_sock.local_addr().unwrap();
+
+        let hbbs_sock_clone = hbbs_sock.clone();
+        let hbbs_handle = tokio::spawn(async move {
+            let mut buf = vec![0u8; 65535];
+            // Read RegisterPeer, respond, then send a fake RelayResponse.
+            let (n, src) = hbbs_sock_clone.recv_from(&mut buf).await.unwrap();
+            let msg = proto::RendezvousMessage::decode(&buf[..n]).unwrap();
+            assert!(matches!(
+                msg.union,
+                Some(proto::rendezvous_message::Union::RegisterPeer(_))
+            ));
+
+            // Send RegisterPeerResponse.
+            let resp = proto::RendezvousMessage {
+                union: Some(proto::rendezvous_message::Union::RegisterPeerResponse(
+                    proto::RegisterPeerResponse { request_pk: false },
+                )),
+            };
+            hbbs_sock_clone
+                .send_to(&resp.encode_to_vec(), src)
+                .await
+                .unwrap();
+
+            // Now send a RelayResponse (simulating a client requesting relay).
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let relay_resp = proto::RendezvousMessage {
+                union: Some(proto::rendezvous_message::Union::RelayResponse(
+                    proto::RelayResponse {
+                        uuid: "relay-uuid-abc".to_string(),
+                        relay_server: "hbbr.test:21117".to_string(),
+                        ..Default::default()
+                    },
+                )),
+            };
+            hbbs_sock_clone
+                .send_to(&relay_resp.encode_to_vec(), src)
+                .await
+                .unwrap();
+        });
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+
+        let client = Client {
+            servers: vec![hbbs_addr.to_string()],
+            licence_key: String::new(),
+            local_id: "testdev123".to_string(),
+            group_hash: String::new(),
+            hostname: "test".to_string(),
+            platform: "linux".to_string(),
+        };
+
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            client.run_registration_loop(cancel_clone, tx).await;
+        });
+
+        // Wait for the relay notification.
+        let notif = timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("should receive relay notification within 5s")
+            .expect("channel should not be closed");
+
+        assert_eq!(notif.uuid, "relay-uuid-abc");
+        assert_eq!(notif.relay_server, "hbbr.test:21117");
+
+        cancel.cancel();
+        hbbs_handle.await.unwrap();
     }
 }
