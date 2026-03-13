@@ -25,7 +25,7 @@ use crate::session_log::{self, HostSummary, LogEntry, LogFilter};
 
 // ── View mode ───────────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum View {
     Entries,
     Summary,
