@@ -46,6 +46,8 @@ pub struct GroupPeerInfo {
     pub platform: String,
     pub addr: Option<SocketAddr>,
     pub last_seen_secs: u64,
+    /// rsh command listener port (0 means default 8822).
+    pub service_port: u16,
 }
 
 /// A relay notification received from hbbs: a client wants to connect via relay.
@@ -71,6 +73,8 @@ pub struct Client {
     pub hostname: String,
     /// Platform (e.g. "windows", "linux") — included in RegisterPeer.
     pub platform: String,
+    /// rsh command listener port — included in RegisterPeer so hbbs can report it.
+    pub service_port: u16,
 }
 
 /// Check whether a string looks like a device ID rather than a hostname/IP.
@@ -213,6 +217,8 @@ struct PeerEntry {
     hostname: String,
     /// Platform: "windows" or "linux".
     platform: String,
+    /// rsh command listener port (0 = default 8822).
+    service_port: u16,
 }
 
 /// Default peer expiry time (5 minutes without re-registration).
@@ -337,6 +343,7 @@ impl RendezvousServer {
                             group_hash: rp.group_hash.clone(),
                             hostname: rp.hostname.clone(),
                             platform: rp.platform.clone(),
+                            service_port: rp.service_port as u16,
                         },
                     );
                     if has_group {
@@ -484,6 +491,7 @@ impl RendezvousServer {
                     platform: entry.platform.clone(),
                     socket_addr: encode_socket_addr(&entry.addr),
                     last_seen_secs,
+                    service_port: entry.service_port as i32,
                 }
             })
             .collect();
@@ -571,6 +579,7 @@ impl RendezvousServer {
                     platform: entry.platform.clone(),
                     socket_addr: encode_socket_addr(&entry.addr),
                     last_seen_secs,
+                    service_port: entry.service_port as i32,
                 }
             })
             .collect();
@@ -719,6 +728,7 @@ impl Client {
                         platform: p.platform,
                         addr,
                         last_seen_secs: p.last_seen_secs,
+                        service_port: p.service_port as u16,
                     }
                 }).collect();
                 return Ok(peers);
@@ -784,6 +794,7 @@ impl Client {
                         platform: p.platform,
                         addr,
                         last_seen_secs: p.last_seen_secs,
+                        service_port: p.service_port as u16,
                     }
                 }).collect();
                 return Ok(peers);
@@ -840,6 +851,7 @@ impl Client {
                     group_hash: self.group_hash.clone(),
                     hostname: self.hostname.clone(),
                     platform: self.platform.clone(),
+                    service_port: self.service_port as i32,
                 },
             )),
         };
@@ -1088,6 +1100,7 @@ impl Client {
                     group_hash: self.group_hash.clone(),
                     hostname: self.hostname.clone(),
                     platform: self.platform.clone(),
+                    service_port: self.service_port as i32,
                 },
             )),
         };
@@ -1310,6 +1323,7 @@ mod tests {
                 group_hash: String::new(),
                 hostname: String::new(),
                 platform: String::new(),
+                service_port: 0,
             };
             assert!(c.resolve("123456789").await.is_err());
         });
@@ -1405,10 +1419,7 @@ mod tests {
             union: Some(proto::rendezvous_message::Union::RegisterPeer(
                 proto::RegisterPeer {
                     id: "dev123".to_string(),
-                    serial: 0,
-                    group_hash: String::new(),
-                    hostname: String::new(),
-                    platform: String::new(),
+                    ..Default::default()
                 },
             )),
         };
@@ -1545,6 +1556,7 @@ mod tests {
                 group_hash: String::new(),
                 hostname: String::new(),
                 platform: String::new(),
+                service_port: 0,
             },
         );
 
@@ -1581,6 +1593,7 @@ mod tests {
                 group_hash: String::new(),
                 hostname: String::new(),
                 platform: String::new(),
+                service_port: 0,
             },
         );
 
@@ -1625,6 +1638,7 @@ mod tests {
                 group_hash: String::new(),
                 hostname: String::new(),
                 platform: String::new(),
+                service_port: 0,
             },
         );
 
@@ -1703,6 +1717,7 @@ mod tests {
                 group_hash: String::new(),
                 hostname: String::new(),
                 platform: String::new(),
+                service_port: 0,
             },
         );
 
@@ -1734,6 +1749,7 @@ mod tests {
             group_hash: String::new(),
             hostname: "test-host".to_string(),
             platform: "linux".to_string(),
+            service_port: 8822,
         }
     }
 
@@ -1822,10 +1838,10 @@ mod tests {
             union: Some(proto::rendezvous_message::Union::RegisterPeer(
                 proto::RegisterPeer {
                     id: "999888777".to_string(),
-                    serial: 0,
-                    group_hash: String::new(),
                     hostname: "test-device".to_string(),
                     platform: "linux".to_string(),
+                    service_port: 8822,
+                    ..Default::default()
                 },
             )),
         };
@@ -2034,6 +2050,7 @@ mod tests {
             group_hash: String::new(),
             hostname: "test".to_string(),
             platform: "linux".to_string(),
+            service_port: 8822,
         };
 
         let cancel_clone = cancel.clone();
@@ -2069,6 +2086,7 @@ mod tests {
                 group_hash: String::new(),
                 hostname: "host-a".to_string(),
                 platform: "windows".to_string(),
+                service_port: 0,
             },
         );
         peers.lock().unwrap().insert(
@@ -2079,6 +2097,7 @@ mod tests {
                 group_hash: String::new(),
                 hostname: "host-b".to_string(),
                 platform: "linux".to_string(),
+                service_port: 0,
             },
         );
 
@@ -2115,6 +2134,7 @@ mod tests {
                 group_hash: String::new(),
                 hostname: "host-a".to_string(),
                 platform: "windows".to_string(),
+                service_port: 0,
             },
         );
 

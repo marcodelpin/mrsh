@@ -46,6 +46,7 @@ pub async fn connect_via_relay(opts: &RelayConnectOptions) -> Result<TlsClient> 
         group_hash: String::new(),
         hostname: String::new(),
         platform: String::new(),
+        service_port: 0,
     };
 
     let result = rdv_client

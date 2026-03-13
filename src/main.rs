@@ -2279,6 +2279,7 @@ async fn run_fleet(args: &[String]) -> Result<()> {
                 group_hash: String::new(),
                 hostname: String::new(),
                 platform: String::new(),
+                service_port: 0,
             };
 
             eprintln!("Querying {} for group '{}'...", rdv_server, group_name);
@@ -2689,6 +2690,7 @@ async fn run_server_mode_inner(
 
             // Registration + relay notification listener.
             let cancel_reg = cancel.clone();
+            let svc_port = port;
             tokio::spawn(async move {
                 let client = rsh_relay::rendezvous::Client {
                     servers: rdv_servers,
@@ -2697,6 +2699,7 @@ async fn run_server_mode_inner(
                     group_hash,
                     hostname,
                     platform,
+                    service_port: svc_port,
                 };
                 client.run_registration_loop(cancel_reg, relay_tx).await;
             });

@@ -33,6 +33,7 @@ message RegisterPeer {
   string group_hash = 3;   // SHA256(enrollment_token), hex-encoded
   string hostname = 4;
   string platform = 5;     // "windows" or "linux"
+  int32 service_port = 6;  // rsh command listener port (e.g. 8822)
 }
 
 message RegisterPeerResponse {
@@ -235,6 +236,7 @@ message GroupPeer {
   string platform = 3;
   bytes socket_addr = 4;   // AddrMangle-encoded
   uint64 last_seen_secs = 5;  // seconds since UNIX epoch
+  int32 service_port = 6;  // rsh command listener port (0 = default 8822)
 }
 
 // --- Fleet peer list (rsh extension) ---

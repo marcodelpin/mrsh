@@ -98,10 +98,11 @@ pub async fn status(config: &Config) -> Vec<HostStatus> {
         let device_id = Some(peer.device_id.clone());
         let rdv_server = config.rendezvous_server.clone();
         let rdv_key = config.rendezvous_key.clone();
+        let port = if peer.service_port > 0 { peer.service_port } else { 8822 };
 
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.ok();
-            probe_host(&name, &hostname, 8822, device_id, rdv_server, rdv_key, None).await
+            probe_host(&name, &hostname, port, device_id, rdv_server, rdv_key, None).await
         }));
     }
 
@@ -131,6 +132,7 @@ async fn discover_from_hbbs(config: &Config) -> Vec<rsh_relay::rendezvous::Group
         group_hash: String::new(),
         hostname: String::new(),
         platform: String::new(),
+        service_port: 0,
     };
 
     match client.list_peers().await {
