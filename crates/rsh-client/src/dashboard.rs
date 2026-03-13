@@ -248,8 +248,8 @@ pub async fn run_dashboard() -> io::Result<()> {
 /// Inner dashboard loop returning the user's choice.
 async fn run_dashboard_interactive() -> io::Result<DashboardResult> {
     let config = Config::load();
-    if config.hosts.is_empty() {
-        eprintln!("No hosts configured. Use `rsh config-edit` to add hosts.");
+    if config.hosts.is_empty() && config.rendezvous_server.is_none() {
+        eprintln!("No hosts configured and no rendezvous server. Use `rsh config-edit` to add hosts.");
         return Ok(DashboardResult::Quit);
     }
 
@@ -280,13 +280,26 @@ async fn run_loop(
     terminal: &mut Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>,
     app: &mut App,
 ) -> io::Result<DashboardResult> {
+    // Background refresh: spawned task sends results via channel.
+    // This keeps the event loop responsive during long probe timeouts.
+    let (refresh_tx, mut refresh_rx) = tokio::sync::mpsc::channel::<Vec<HostStatus>>(1);
+
+    /// Spawn a background fleet status probe.
+    fn spawn_refresh(config: &Config, tx: &tokio::sync::mpsc::Sender<Vec<HostStatus>>) {
+        let config = config.clone();
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let hosts = fleet::status(&config).await;
+            let _ = tx.send(hosts).await;
+        });
+    }
+
     loop {
         terminal.draw(|f| draw(f, app))?;
 
-        // Auto-refresh check (paused while menu is open)
-        if app.needs_refresh() {
-            app.refreshing = true;
-            app.hosts = fleet::status(&app.config).await;
+        // Check if background refresh completed
+        if let Ok(hosts) = refresh_rx.try_recv() {
+            app.hosts = hosts;
             app.last_refresh = Instant::now();
             app.refreshing = false;
             // Clamp selection
@@ -296,6 +309,12 @@ async fn run_loop(
                     app.table_state.select(Some(app.hosts.len() - 1));
                 }
             }
+        }
+
+        // Auto-refresh check (paused while menu is open)
+        if app.needs_refresh() && !app.refreshing {
+            app.refreshing = true;
+            spawn_refresh(&app.config, &refresh_tx);
             continue;
         }
 
@@ -337,12 +356,10 @@ async fn run_loop(
                         KeyCode::Up | KeyCode::Char('k') => app.prev(),
                         KeyCode::Down | KeyCode::Char('j') => app.next(),
                         KeyCode::Enter => app.open_menu(),
-                        KeyCode::Char('r') => {
+                        KeyCode::Char('r') if !app.refreshing => {
                             // Force refresh
                             app.refreshing = true;
-                            app.hosts = fleet::status(&app.config).await;
-                            app.last_refresh = Instant::now();
-                            app.refreshing = false;
+                            spawn_refresh(&app.config, &refresh_tx);
                         }
                         _ => {}
                     }
