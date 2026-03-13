@@ -16,7 +16,7 @@ use chrono::{Datelike, Local, NaiveDate};
 use serde::{Deserialize, Serialize};
 
 /// A single session log entry.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
     /// Host name (as specified by user, before resolution)
     pub host: String,
@@ -141,6 +141,14 @@ fn truncate_args(s: &str, max_len: usize) -> String {
     } else {
         format!("{}...", &s[..max_len])
     }
+}
+
+/// Default log directory: `~/.rsh/logs/`.
+pub fn default_log_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".rsh")
+        .join("logs")
 }
 
 // ── Log query/report ─────────────────────────────────────────────

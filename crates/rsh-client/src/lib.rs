@@ -8,6 +8,8 @@ pub mod fleet;
 pub mod host_picker;
 pub mod mux;
 pub mod recording;
+pub mod dashboard;
+pub mod log_viewer;
 pub mod session_log;
 pub mod sftp;
 pub mod shell;

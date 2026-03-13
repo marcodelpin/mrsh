@@ -130,7 +130,7 @@ struct Cli {
 
 /// Known local subcommands that don't require -h (used in server mode detection).
 #[cfg(target_os = "windows")]
-const LOCAL_COMMANDS: &[&str] = &["version", "fleet", "wake", "config-edit", "connect", "log", "keygen", "totp-setup", "totp-verify", "install-pack", "relay", "rendezvous"];
+const LOCAL_COMMANDS: &[&str] = &["version", "fleet", "wake", "config-edit", "connect", "log", "logs", "dashboard", "keygen", "totp-setup", "totp-verify", "install-pack", "relay", "rendezvous"];
 
 /// Returns the effective operation timeout in seconds.
 /// Explicit `--timeout N` (N > 0) overrides everything.
@@ -429,6 +429,14 @@ async fn async_main(cli: Cli) -> Result<()> {
         "log" => {
             return run_log_query(&args[1..]);
         }
+        "logs" => {
+            rsh_client::log_viewer::run_log_viewer()?;
+            return Ok(());
+        }
+        "dashboard" => {
+            rsh_client::dashboard::run_dashboard().await?;
+            return Ok(());
+        }
         "install-pack" => {
             return run_install_pack(&args[1..]);
         }
@@ -700,7 +708,228 @@ async fn async_main(cli: Cli) -> Result<()> {
                 std::fs::write(&out_path, &data)?;
                 eprintln!("saved {} ({} bytes)", out_path, data.len());
             }
-            _ => bail!("command {:?} is not supported over QUIC (omit --quic)", cmd),
+            // ── Clipboard ────────────────────────────────────────────
+            "clip" | "clipboard" => {
+                let action = args.get(1).map(|s| s.as_str()).unwrap_or("get");
+                match action {
+                    "get" | "read" => {
+                        let output = quic.exec("Get-Clipboard").await?;
+                        print!("{}", output);
+                    }
+                    "set" | "write" | "copy" => {
+                        if args.len() < 3 {
+                            bail!("clip set requires text");
+                        }
+                        let text = args[2..].join(" ");
+                        let escaped = text.replace('\'', "''");
+                        quic.exec(&format!("Set-Clipboard '{}'", escaped)).await?;
+                        eprintln!("clipboard set");
+                    }
+                    other => bail!("unknown clip action: {} (use get|set)", other),
+                }
+            }
+            // ── Service management ───────────────────────────────────
+            "service" | "svc" => {
+                if args.len() < 2 {
+                    bail!("service requires: list|status|start|stop|restart [name]");
+                }
+                let action = args[1].as_str();
+                let name = args.get(2).map(|s| s.as_str());
+                let ps_cmd = match (action, name) {
+                    ("list", _) => "Get-Service | Select-Object Status,Name,DisplayName | ConvertTo-Json".to_string(),
+                    ("status", Some(n)) => format!("Get-Service '{}' | Select-Object Status,Name,DisplayName,StartType | ConvertTo-Json", n),
+                    ("start", Some(n)) => format!("Start-Service '{}'; Get-Service '{}' | Select-Object Status,Name | ConvertTo-Json", n, n),
+                    ("stop", Some(n)) => format!("Stop-Service '{}' -Force; Get-Service '{}' | Select-Object Status,Name | ConvertTo-Json", n, n),
+                    ("restart", Some(n)) => format!("Restart-Service '{}'; Get-Service '{}' | Select-Object Status,Name | ConvertTo-Json", n, n),
+                    (_, None) => bail!("service {} requires a service name", action),
+                    (other, _) => bail!("unknown service action: {} (use list|status|start|stop|restart)", other),
+                };
+                let output = quic.exec(&ps_cmd).await?;
+                println!("{}", output);
+            }
+            // ── Write file ───────────────────────────────────────────
+            "write" => {
+                if args.len() < 3 {
+                    bail!("write requires <remote-path> <content>");
+                }
+                let content = args[2..].join(" ");
+                let written = quic.push(&args[1], content.as_bytes()).await?;
+                eprintln!("wrote {} bytes to {}", written, args[1]);
+            }
+            // ── Self-update ──────────────────────────────────────────
+            "self-update" => {
+                if args.len() < 2 {
+                    bail!("self-update requires <remote-binary-path>");
+                }
+                let escaped = args[1].replace('\'', "''");
+                let output = quic.exec(&format!(
+                    "$src = '{}'; \
+                     $exe = (Get-Process -Id $PID).Path; \
+                     $bak = $exe + '.old'; \
+                     if (Test-Path $bak) {{ Remove-Item $bak -Force }}; \
+                     Rename-Item $exe $bak; \
+                     Copy-Item $src $exe; \
+                     Remove-Item $src -Force; \
+                     'OK: restart service to apply'",
+                    escaped
+                )).await?;
+                eprintln!("{}", output);
+            }
+            // ── GUI automation ───────────────────────────────────────
+            "input" | "mouse" | "key" | "window" => {
+                if args.len() < 3 {
+                    bail!("{} requires <action> <args>", cmd);
+                }
+                // Forward as native exec — server handles via input handler
+                let full_cmd = args.join(" ");
+                let output = quic.exec(&full_cmd).await?;
+                if !output.is_empty() {
+                    println!("{}", output);
+                }
+            }
+            // ── Power management ─────────────────────────────────────
+            "reboot" => {
+                let force = args.get(1).map(|s| s == "-f" || s == "--force").unwrap_or(false);
+                if !force {
+                    eprint!("Reboot {}:{}? [y/N] ", resolved_host, resolved_port);
+                    let mut answer = String::new();
+                    std::io::stdin().read_line(&mut answer)?;
+                    let a = answer.trim().to_lowercase();
+                    if a != "y" && a != "yes" && a != "si" {
+                        return Ok(());
+                    }
+                }
+                eprintln!("Rebooting {}:{}...", resolved_host, resolved_port);
+                quic.exec("Restart-Computer -Force").await.ok();
+            }
+            "shutdown" => {
+                let force = args.get(1).map(|s| s == "-f" || s == "--force").unwrap_or(false);
+                if !force {
+                    eprint!("Shutdown {}:{}? [y/N] ", resolved_host, resolved_port);
+                    let mut answer = String::new();
+                    std::io::stdin().read_line(&mut answer)?;
+                    let a = answer.trim().to_lowercase();
+                    if a != "y" && a != "yes" && a != "si" {
+                        return Ok(());
+                    }
+                }
+                eprintln!("Shutting down {}:{}...", resolved_host, resolved_port);
+                quic.exec("Stop-Computer -Force").await.ok();
+                eprintln!("Shutdown command sent.");
+            }
+            "sleep" => {
+                let force = args.get(1).map(|s| s == "-f" || s == "--force").unwrap_or(false);
+                if !force {
+                    eprint!("Sleep {}:{}? [y/N] ", resolved_host, resolved_port);
+                    let mut answer = String::new();
+                    std::io::stdin().read_line(&mut answer)?;
+                    let a = answer.trim().to_lowercase();
+                    if a != "y" && a != "yes" && a != "si" {
+                        return Ok(());
+                    }
+                }
+                eprintln!("Putting {}:{} to sleep...", resolved_host, resolved_port);
+                quic.exec(
+                    "Add-Type -Assembly System.Windows.Forms; [System.Windows.Forms.Application]::SetSuspendState([System.Windows.Forms.PowerState]::Suspend, $true, $false)"
+                ).await.ok();
+                eprintln!("Sleep command sent.");
+            }
+            "lock" => {
+                eprintln!("Locking workstation on {}:{}...", resolved_host, resolved_port);
+                quic.exec("rundll32.exe user32.dll,LockWorkStation").await?;
+                eprintln!("Workstation locked.");
+            }
+            // ── Status (multi-ping with RTT stats) ───────────────────
+            "status" => {
+                let count: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5);
+                let mut rtts = Vec::with_capacity(count);
+                let mut failures = 0usize;
+                println!("--- {} (QUIC) ---", resolved_host);
+                for i in 0..count {
+                    let start = std::time::Instant::now();
+                    match quic.exec("echo PONG").await {
+                        Ok(_) => {
+                            let elapsed = start.elapsed();
+                            eprintln!("  ping {}: {:.1?}", i + 1, elapsed);
+                            rtts.push(elapsed);
+                        }
+                        Err(e) => {
+                            failures += 1;
+                            eprintln!("  ping {}: FAILED ({})", i + 1, e);
+                        }
+                    }
+                    if i < count - 1 {
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                }
+                if !rtts.is_empty() {
+                    let avg = rtts.iter().sum::<std::time::Duration>() / rtts.len() as u32;
+                    let min = rtts.iter().min().unwrap();
+                    let max = rtts.iter().max().unwrap();
+                    let mut sorted = rtts.clone();
+                    sorted.sort();
+                    let p50 = sorted[sorted.len() / 2];
+                    let loss = (failures as f64 / count as f64) * 100.0;
+                    println!("rtt min/avg/max/p50 = {:.1?}/{:.1?}/{:.1?}/{:.1?}", min, avg, max, p50);
+                    if failures > 0 {
+                        println!("packet loss: {:.0}%", loss);
+                    }
+                }
+            }
+            // ── Cache management ─────────────────────────────────────
+            "cache" => {
+                if args.len() < 2 {
+                    bail!("cache requires: stats|index [path]");
+                }
+                match args[1].as_str() {
+                    "stats" => {
+                        let output = quic.exec("if (Test-Path 'C:\\ProgramData\\remote-shell\\cache') { Get-ChildItem 'C:\\ProgramData\\remote-shell\\cache' -Recurse | Measure-Object -Property Length -Sum | Select-Object Count,Sum | ConvertTo-Json } else { '{\"Count\":0,\"Sum\":0}' }").await?;
+                        println!("{}", output);
+                    }
+                    "index" => {
+                        if args.len() < 3 {
+                            bail!("cache index requires <remote-path>");
+                        }
+                        let escaped = args[2].replace('\'', "''");
+                        let output = quic.exec(&format!(
+                            "Get-ChildItem '{}' -Recurse | Select-Object FullName,Length,LastWriteTime | ConvertTo-Json",
+                            escaped
+                        )).await?;
+                        println!("{}", output);
+                    }
+                    other => bail!("unknown cache action: {} (use stats|index)", other),
+                }
+            }
+            // ── Plugin management ────────────────────────────────────
+            "plugin" => {
+                if args.len() < 2 {
+                    bail!("plugin requires <action> [args...]");
+                }
+                let plugin_cmd = args[1..].join(" ");
+                let output = quic.exec(&format!("rsh plugin {}", plugin_cmd)).await?;
+                if !output.is_empty() {
+                    println!("{}", output);
+                }
+            }
+            // ── Recording list ───────────────────────────────────────
+            "recording" => {
+                let output = quic.exec("if (Test-Path 'C:\\ProgramData\\remote-shell\\recordings') { Get-ChildItem 'C:\\ProgramData\\remote-shell\\recordings' -Filter '*.cast' | Select-Object Name,Length,LastWriteTime | ConvertTo-Json } else { '[]' }").await?;
+                println!("{}", output);
+            }
+            // ── Server version ───────────────────────────────────────
+            "server-version" => {
+                println!("{}", quic.server_version.as_deref().unwrap_or("unknown"));
+            }
+            // ── TUI-only commands (not applicable over QUIC) ─────────
+            "sessions" | "attach" | "browse" | "sftp" => {
+                bail!("command {:?} requires TUI mode (omit --quic)", cmd);
+            }
+            // ── Unknown → try as exec ────────────────────────────────
+            _ => {
+                let command = args.join(" ");
+                let output = quic.exec(&command).await?;
+                print!("{}", output);
+            }
         }
         quic.close();
         return Ok(());
@@ -2554,6 +2783,8 @@ LOCAL COMMANDS (no -h needed):
   log           Session log report (hours per host)
                   --host=X  --since=YYYY-MM-DD  --until=YYYY-MM-DD
                   --detail  --json
+  logs          Interactive log viewer (TUI) — browse, filter, summarize
+  dashboard     Fleet dashboard (TUI) — live host status, auto-refresh
   keygen [path] Generate ed25519 key pair
   totp-setup [fp] Generate TOTP secret + recovery codes for a key
   totp-verify <secret|fp> <code>  Verify a TOTP code
