@@ -260,6 +260,110 @@ pub async fn clip_set<S: AsyncRead + AsyncWrite + Unpin>(
     native(client, &format!("clip-set {}", text)).await
 }
 
+/// Bidirectional clipboard sync — polls local and remote, syncs changes.
+///
+/// Runs until cancelled (Ctrl+C). Uses `clip-get`/`clip-set` commands
+/// under the hood, polling every `interval`.
+pub async fn clip_sync<S: AsyncRead + AsyncWrite + Unpin>(
+    client: &mut RshClient<S>,
+    interval: std::time::Duration,
+) -> Result<()> {
+    use std::io::Write;
+
+    let mut last_local = get_local_clipboard().unwrap_or_default();
+    let mut last_remote = native(client, "clip-get").await.unwrap_or_default();
+
+    eprintln!("Clipboard sync active (poll {}ms). Ctrl+C to stop.", interval.as_millis());
+
+    loop {
+        tokio::time::sleep(interval).await;
+
+        // Check local clipboard
+        let local = get_local_clipboard().unwrap_or_default();
+        if !local.is_empty() && local != last_local {
+            // Local changed → push to remote
+            if native(client, &format!("clip-set {}", local)).await.is_ok() {
+                eprint!("→ ");
+                std::io::stderr().flush().ok();
+                last_local = local.clone();
+                last_remote = local;
+            }
+            continue;
+        }
+
+        // Check remote clipboard
+        match native(client, "clip-get").await {
+            Ok(remote) if !remote.is_empty() && remote != last_remote => {
+                // Remote changed → pull to local
+                if set_local_clipboard(&remote).is_ok() {
+                    eprint!("← ");
+                    std::io::stderr().flush().ok();
+                    last_remote = remote.clone();
+                    last_local = remote;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Get local clipboard text (cross-platform via PowerShell on Windows, xclip/xsel on Linux).
+fn get_local_clipboard() -> Result<String> {
+    #[cfg(target_os = "windows")]
+    {
+        let out = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Get-Clipboard"])
+            .output()?;
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Try xclip first, then xsel
+        let out = std::process::Command::new("xclip")
+            .args(["-selection", "clipboard", "-o"])
+            .output()
+            .or_else(|_| {
+                std::process::Command::new("xsel")
+                    .args(["--clipboard", "--output"])
+                    .output()
+            });
+        match out {
+            Ok(o) => Ok(String::from_utf8_lossy(&o.stdout).trim().to_string()),
+            Err(e) => bail!("clipboard read failed (install xclip or xsel): {}", e),
+        }
+    }
+}
+
+/// Set local clipboard text.
+fn set_local_clipboard(text: &str) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &format!("Set-Clipboard -Value '{}'", text.replace('\'', "''"))])
+            .output()?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        use std::io::Write;
+        let mut child = std::process::Command::new("xclip")
+            .args(["-selection", "clipboard"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .or_else(|_| {
+                std::process::Command::new("xsel")
+                    .args(["--clipboard", "--input"])
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()
+            })?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(text.as_bytes())?;
+        }
+        child.wait()?;
+        Ok(())
+    }
+}
+
 /// Service management (list, status, start, stop, restart).
 pub async fn service<S: AsyncRead + AsyncWrite + Unpin>(
     client: &mut RshClient<S>,

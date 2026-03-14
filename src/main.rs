@@ -1395,7 +1395,17 @@ async fn async_main(cli: Cli) -> Result<()> {
                     let result = rsh_client::commands::clip_set(&mut client, &text).await?;
                     println!("{}", result);
                 }
-                other => bail!("unknown clip action: {} (use get|set)", other),
+                "sync" => {
+                    let interval_ms: u64 = args.get(2)
+                        .and_then(|s| s.strip_prefix("--interval=").or(Some(s.as_str())))
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(500);
+                    rsh_client::commands::clip_sync(
+                        &mut client,
+                        std::time::Duration::from_millis(interval_ms),
+                    ).await?;
+                }
+                other => bail!("unknown clip action: {} (use get|set|sync)", other),
             }
         }
         "service" | "svc" => {
