@@ -10,6 +10,19 @@ use rsh_core::{auth, protocol, wire};
 
 use crate::{dispatch, ratelimit, session, shell, sync, tunnel};
 
+/// Send a response, using zstd compression if the client supports it.
+async fn send_resp<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    resp: &protocol::Response,
+    use_zstd: bool,
+) -> Result<()> {
+    if use_zstd {
+        wire::send_json_compressed(writer, resp).await
+    } else {
+        wire::send_json(writer, resp).await
+    }
+}
+
 /// Server-side configuration for connection handling.
 pub struct ServerContext {
     pub authorized_keys: Vec<auth::AuthorizedKey>,
@@ -95,6 +108,8 @@ where
         crate::notify::notify_connection(addr, client.key_comment.clone());
     }
 
+    let use_zstd = client.caps.iter().any(|c| c == "zstd");
+
     // Phase 2: MUX or standard request loop
     #[cfg(windows)]
     if client.mux_enabled {
@@ -136,7 +151,7 @@ where
                 binary: None,
                 gzip: None,
             };
-            wire::send_json(&mut stream, &resp).await?;
+            send_resp(&mut stream, &resp, use_zstd).await?;
             continue;
         }
 
@@ -149,7 +164,7 @@ where
 
         match dispatch::dispatch(&req, &ctx.session_store).await {
             dispatch::DispatchResult::Response(response) => {
-                wire::send_json(&mut stream, &response).await?;
+                send_resp(&mut stream, &response, use_zstd).await?;
             }
             dispatch::DispatchResult::SyncStream(action) => {
                 match action {

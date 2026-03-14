@@ -14,7 +14,7 @@ use tracing::{debug, info};
 pub const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Capabilities advertised to server.
-const CLIENT_CAPS: &[&str] = &["bin-patch", "shell", "self-update"];
+const CLIENT_CAPS: &[&str] = &["bin-patch", "shell", "self-update", "zstd"];
 
 /// Connected and authenticated client.
 pub struct RshClient<S> {
@@ -413,9 +413,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RshClient<S> {
         wire::send_json(&mut self.stream, req)
             .await
             .context("send request")?;
-        let resp: protocol::Response = wire::recv_json(&mut self.stream)
-            .await
-            .context("receive response")?;
+        // Use compressed recv if server supports zstd (backward-compatible: auto-detects flag byte)
+        let resp: protocol::Response = if self.server_caps.iter().any(|c| c == "zstd") {
+            wire::recv_json_compressed(&mut self.stream).await
+        } else {
+            wire::recv_json(&mut self.stream).await
+        }
+        .context("receive response")?;
         Ok(resp)
     }
 

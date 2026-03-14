@@ -2648,6 +2648,8 @@ fn build_server_caps() -> Vec<String> {
     #[cfg(feature = "quic")]
     caps.push("quic".to_string());
 
+    caps.push("zstd".to_string());
+
     caps
 }
 
