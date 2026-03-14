@@ -2602,6 +2602,43 @@ async fn run_server_mode_with_cancel(
     run_server_mode_inner(port, false, cancel).await
 }
 
+/// Resolve the DeviceID with fallback chain:
+/// 1. Config `device_id` field (if set) → use it
+/// 2. Legacy `device_id` file in data_dir (from old Go installs) → use it
+/// 3. Neither → generate a new 9-digit numeric ID, save to config
+fn resolve_device_id(config: &rsh_core::config::Config, data_dir: &std::path::Path) -> String {
+    let config_id = config.device_id.clone().unwrap_or_default();
+    if !config_id.is_empty() {
+        return config_id;
+    }
+
+    // Fallback 1: read device_id file from data dir (legacy Go installs)
+    let file_id = std::fs::read_to_string(data_dir.join("device_id"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
+    let id = if file_id.is_empty() {
+        // Fallback 2: generate a new 9-digit numeric device ID
+        use rand::Rng;
+        let n: u32 = rand::thread_rng().gen_range(100_000_000..999_999_999);
+        n.to_string()
+    } else {
+        file_id
+    };
+
+    // Persist to config so it's stable across restarts
+    let mut cfg = rsh_core::config::Config::load();
+    cfg.device_id = Some(id.clone());
+    if let Err(e) = cfg.save() {
+        tracing::warn!("could not save device_id to config: {}", e);
+    } else {
+        tracing::info!("generated and saved DeviceID {}", id);
+    }
+
+    id
+}
+
 /// Build the list of capabilities this server supports.
 /// Advertised to clients during auth handshake so they know what commands are available.
 fn build_server_caps() -> Vec<String> {
@@ -2739,33 +2776,7 @@ async fn run_server_mode_inner(
     {
         let user_config = rsh_core::config::Config::load();
         let rdv_servers = user_config.get_rendezvous_servers();
-        let device_id = user_config.device_id.clone().unwrap_or_default();
-        let device_id = if device_id.is_empty() {
-            // Fallback 1: read device_id file from server data dir (legacy Go installs)
-            let file_id = std::fs::read_to_string(data_dir.join("device_id"))
-                .ok()
-                .map(|s| s.trim().to_string())
-                .unwrap_or_default();
-            let id = if file_id.is_empty() {
-                // Fallback 2: generate a new 9-digit numeric device ID
-                use rand::Rng;
-                let n: u32 = rand::thread_rng().gen_range(100_000_000..999_999_999);
-                n.to_string()
-            } else {
-                file_id
-            };
-            // Persist to config so it's stable across restarts
-            let mut cfg = rsh_core::config::Config::load();
-            cfg.device_id = Some(id.clone());
-            if let Err(e) = cfg.save() {
-                tracing::warn!("could not save device_id to config: {}", e);
-            } else {
-                tracing::info!("generated and saved DeviceID {}", id);
-            }
-            id
-        } else {
-            device_id
-        };
+        let device_id = resolve_device_id(&user_config, &data_dir);
         let rdv_key = user_config.rendezvous_key.clone().unwrap_or_default();
         // Compute group_hash from enrollment_token (if present in config).
         let group_hash = if let Some(ref token) = user_config.enrollment_token {
@@ -3396,6 +3407,48 @@ mod tests {
         for cap in &caps {
             assert!(seen.insert(cap), "duplicate cap: {}", cap);
         }
+    }
+
+    // --- resolve_device_id ---
+
+    #[test]
+    fn device_id_from_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = rsh_core::config::Config::default();
+        config.device_id = Some("123456789".to_string());
+        let id = resolve_device_id(&config, tmp.path());
+        assert_eq!(id, "123456789");
+    }
+
+    #[test]
+    fn device_id_from_legacy_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("device_id"), "987654321\n").unwrap();
+        let config = rsh_core::config::Config::default(); // no device_id set
+        let id = resolve_device_id(&config, tmp.path());
+        assert_eq!(id, "987654321");
+    }
+
+    #[test]
+    fn device_id_generated_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = rsh_core::config::Config::default();
+        let id = resolve_device_id(&config, tmp.path());
+        // Should be 9 digits
+        assert_eq!(id.len(), 9, "generated ID should be 9 digits: {}", id);
+        assert!(id.chars().all(|c| c.is_ascii_digit()), "ID should be all digits: {}", id);
+        let n: u32 = id.parse().unwrap();
+        assert!(n >= 100_000_000 && n < 999_999_999);
+    }
+
+    #[test]
+    fn device_id_config_takes_precedence_over_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("device_id"), "111111111").unwrap();
+        let mut config = rsh_core::config::Config::default();
+        config.device_id = Some("222222222".to_string());
+        let id = resolve_device_id(&config, tmp.path());
+        assert_eq!(id, "222222222", "config should take precedence over file");
     }
 
     #[test]
