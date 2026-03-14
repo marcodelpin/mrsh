@@ -294,8 +294,39 @@ fn check_permission(req: &protocol::Request, perms: &auth::KeyPermissions) -> Op
                 }
             }
         }
+        // Native commands — check specific permissions based on command content
+        "native" => {
+            let cmd = req.command.as_deref().unwrap_or("");
+            if cmd.starts_with("clip-") && !perms.allow_clipboard {
+                return Some("clipboard not permitted for this key".to_string());
+            }
+            if (cmd == "reboot" || cmd == "shutdown" || cmd == "sleep" || cmd == "lock") && !perms.allow_reboot {
+                return Some("reboot/shutdown not permitted for this key".to_string());
+            }
+            if cmd == "screenshot" && !perms.allow_screenshot {
+                return Some("screenshot not permitted for this key".to_string());
+            }
+        }
+        // Input (GUI automation) commands
+        "input" => {
+            if !perms.allow_gui {
+                return Some("GUI automation not permitted for this key".to_string());
+            }
+        }
+        // Screenshot
+        "screenshot" => {
+            if !perms.allow_screenshot {
+                return Some("screenshot not permitted for this key".to_string());
+            }
+        }
+        // Self-update
+        "self-update" => {
+            if !perms.allow_self_update {
+                return Some("self-update not permitted for this key".to_string());
+            }
+        }
         // Utility/info commands: always allowed
-        "ping" | "screenshot" | "native" | "self-update" | "session" | "input" | "info" => {}
+        "ping" | "session" | "info" => {}
         // Unknown request types: deny by default
         other => {
             return Some(format!("unknown request type '{}' denied by default", other));
@@ -814,6 +845,11 @@ mod tests {
             allow_pull: false,
             allow_shell: false,
             allow_tunnel: false,
+            allow_gui: false,
+            allow_clipboard: false,
+            allow_reboot: false,
+            allow_screenshot: false,
+            allow_self_update: false,
             forced_command: None,
             require_totp: false,
         };
@@ -827,11 +863,12 @@ mod tests {
         assert!(check_permission(&make_req("shell"), &perms).is_some());
         assert!(check_permission(&make_req("shell-persistent"), &perms).is_some());
         assert!(check_permission(&make_req("connect"), &perms).is_some());
+        assert!(check_permission(&make_req("input"), &perms).is_some());
+        assert!(check_permission(&make_req("screenshot"), &perms).is_some());
+        assert!(check_permission(&make_req("self-update"), &perms).is_some());
 
         // Utility commands always allowed
         assert!(check_permission(&make_req("ping"), &perms).is_none());
-        assert!(check_permission(&make_req("screenshot"), &perms).is_none());
-        assert!(check_permission(&make_req("self-update"), &perms).is_none());
     }
 
     #[test]
@@ -842,8 +879,7 @@ mod tests {
             allow_pull: true,
             allow_shell: false,
             allow_tunnel: false,
-            forced_command: None,
-            require_totp: false,
+            ..Default::default()
         };
 
         let mut req = make_req("sync");
@@ -862,8 +898,7 @@ mod tests {
             allow_pull: true,
             allow_shell: false,
             allow_tunnel: false,
-            forced_command: None,
-            require_totp: false,
+            ..Default::default()
         };
 
         assert!(check_permission(&make_req("exec"), &perms).is_none());

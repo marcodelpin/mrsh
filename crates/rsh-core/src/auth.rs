@@ -216,6 +216,11 @@ pub struct KeyPermissions {
     pub allow_pull: bool,
     pub allow_shell: bool,
     pub allow_tunnel: bool,
+    pub allow_gui: bool,
+    pub allow_clipboard: bool,
+    pub allow_reboot: bool,
+    pub allow_screenshot: bool,
+    pub allow_self_update: bool,
     /// If set, all exec requests are forced to run this command instead.
     pub forced_command: Option<String>,
     /// If true, TOTP 2FA is required after signature verification for this key.
@@ -230,6 +235,11 @@ impl Default for KeyPermissions {
             allow_pull: true,
             allow_shell: true,
             allow_tunnel: true,
+            allow_gui: true,
+            allow_clipboard: true,
+            allow_reboot: true,
+            allow_screenshot: true,
+            allow_self_update: true,
             forced_command: None,
             require_totp: false,
         }
@@ -245,6 +255,11 @@ impl KeyPermissions {
             allow_pull: false,
             allow_shell: false,
             allow_tunnel: false,
+            allow_gui: false,
+            allow_clipboard: false,
+            allow_reboot: false,
+            allow_screenshot: false,
+            allow_self_update: false,
             forced_command: None,
             require_totp: false,
         }
@@ -343,12 +358,22 @@ fn parse_key_options(options_str: Option<&str>) -> KeyPermissions {
             "permit-pull" => perms.allow_pull = true,
             "permit-shell" => perms.allow_shell = true,
             "permit-tunnel" => perms.allow_tunnel = true,
+            "permit-gui" => perms.allow_gui = true,
+            "permit-clipboard" => perms.allow_clipboard = true,
+            "permit-reboot" => perms.allow_reboot = true,
+            "permit-screenshot" => perms.allow_screenshot = true,
+            "permit-self-update" => perms.allow_self_update = true,
             "totp" => perms.require_totp = true,
             "no-exec" => perms.allow_exec = false,
             "no-push" => perms.allow_push = false,
             "no-pull" => perms.allow_pull = false,
             "no-shell" => perms.allow_shell = false,
             "no-tunnel" => perms.allow_tunnel = false,
+            "no-gui" => perms.allow_gui = false,
+            "no-clipboard" => perms.allow_clipboard = false,
+            "no-reboot" => perms.allow_reboot = false,
+            "no-screenshot" => perms.allow_screenshot = false,
+            "no-self-update" => perms.allow_self_update = false,
             _ if opt.starts_with("command=\"") && opt.ends_with('"') => {
                 let cmd = &opt[9..opt.len() - 1];
                 perms.forced_command = Some(cmd.to_string());
