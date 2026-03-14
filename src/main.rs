@@ -130,7 +130,7 @@ struct Cli {
 
 /// Known local subcommands that don't require -h (used in server mode detection).
 #[cfg(target_os = "windows")]
-const LOCAL_COMMANDS: &[&str] = &["version", "fleet", "wake", "cfg", "config-edit", "connect", "log", "logs", "dash", "dashboard", "keygen", "totp-setup", "totp-verify", "pack", "install-pack", "relay", "rdv", "rendezvous", "discover"];
+const LOCAL_COMMANDS: &[&str] = &["version", "fleet", "wake", "cfg", "config-edit", "connect", "log", "logs", "dash", "dashboard", "keygen", "totp-setup", "totp-verify", "pack", "install-pack", "relay", "rdv", "rendezvous", "discover", "nat"];
 
 /// Returns the effective operation timeout in seconds.
 /// Explicit `--timeout N` (N > 0) overrides everything.
@@ -408,6 +408,17 @@ async fn async_main(cli: Cli) -> Result<()> {
                     println!("{:<20} {:<16} {:<10} {:<6}", p.hostname, p.addr.ip(), p.platform, port);
                 }
                 println!("\nFound {} peer(s)", peers.len());
+            }
+            return Ok(());
+        }
+        "nat" => {
+            eprintln!("Detecting NAT type (querying STUN servers)...");
+            let info = rsh_relay::stun::detect_nat_type(
+                std::time::Duration::from_secs(3),
+            ).await;
+            println!("NAT type: {}", info.nat_type);
+            if let Some(addr) = info.external_addr {
+                println!("External address: {}", addr);
             }
             return Ok(());
         }
