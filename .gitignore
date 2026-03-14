@@ -1,17 +1,122 @@
-# Rust build artifacts
+# ============================================================================
+# 1. OS FILES
+# ============================================================================
+.DS_Store
+Thumbs.db
+desktop.ini
+*.lnk
+
+# ============================================================================
+# 2. IDE/EDITOR
+# ============================================================================
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+
+# ============================================================================
+# 3. ENVIRONMENT & SECRETS
+# ============================================================================
+.env
+.env.*
+!.env.example
+!.env.template
+*.pem
+*.key
+*.crt
+id_rsa*
+id_ecdsa*
+id_ed25519*
+secrets/
+**/secrets/**
+**/credentials/**
+**/*.secret
+**/*.credentials
+!**/secrets/README.md
+!**/credentials/README.md
+
+# ============================================================================
+# 4. LOGS & TEMPORARY FILES
+# ============================================================================
+*.log
+logs/
+tmp/
+.tmp/
+.temp/
+*.tmp
+*.cache
+*.bak
+*.backup
+*.backup.*
+*.old
+
+# ============================================================================
+# 5. DATABASES
+# ============================================================================
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+
+# ============================================================================
+# 6. CLAUDE CODE & AI TOOLS
+# ============================================================================
+.claude-flow/
+.swarm/
+.hive-mind/
+.claude/settings.local.json
+.claude/cache/
+.claude/tsc-cache/
+.claude/.coordination-session-id
+claude-flow
+claude-flow.config.json
+.tldr/
+/memory/
+/coordination/
+!/memory/README.md
+!/coordination/README.md
+.beads/*.db
+.beads/dolt*
+.beads/daemon.pid
+.beads/daemon.lock
+.beads/daemon.log
+.beads/daemon-error
+.beads/.local_version
+.beads/.jsonl.lock
+.beads/.sync.lock
+.beads/last-touched
+.beads/export-state/
+.beads/interactions.jsonl
+.beads/backup/
+.aider*
+.codex/
+.gemini/
+.opencode/
+knowledge_graph/
+
+# ============================================================================
+# RUST
+# ============================================================================
 target/
 
+# ============================================================================
+# PROJECT-SPECIFIC
+# ============================================================================
 # Deploy directory (current version only, not tracked)
 deploy/
-
-# Temp artifacts
-.tmp/
-*.tmp
 
 # Generated install packs (released via releases/ with git-lfs)
 rsh-*-windows-install.exe
 rsh-*-linux-install.sh
 
-# Dolt database files (added by bd init)
+# Dolt database files
 .dolt/
-*.db
