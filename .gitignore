@@ -120,3 +120,4 @@ rsh-*-linux-install.sh
 
 # Dolt database files
 .dolt/
+.beads/.beads-credential-key
