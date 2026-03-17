@@ -3123,9 +3123,16 @@ AI USAGE:
     Always check config before assuming default ports.
   - AUTO-TRY PORTS: Without -p, mrsh tries 8822 → 9822 → 22 in sequence.
     Port 22 covers hosts running mrsh on the SSH port. No manual -p needed.
+  - FIREWALL: On install (--install) or first startup, mrsh MUST open firewall
+    for all ports it listens on. Without this, LAN clients get "connection refused".
+    Windows: netsh advfirewall firewall add rule name="mrsh-inbound" dir=in action=allow protocol=TCP localport=8822 profile=private
+    Linux:   ufw allow 8822/tcp  OR  firewall-cmd --add-port=8822/tcp --permanent
+    If mrsh listens on multiple ports (8822, 9822), ALL must have firewall rules.
+    Tailscale installs its own firewall rules but only for the Tailscale IP —
+    LAN traffic (192.168.x.x) is NOT covered and will be blocked without explicit rules.
   - WSL CONNECTIVITY: WSL cannot reach Tailscale hosts (100.x.x.x) via TCP.
-    For Tailscale targets, use the Windows mrsh client:
-      powershell.exe -Command "C:\ProgramData\mrsh\rsh.exe -h <IP> -p <port> exec '<cmd>' | Out-String"
+    For Tailscale targets, use the Windows mrsh client (no -p needed, auto-tries ports):
+      powershell.exe -Command "rsh -h <host> exec '<cmd>' | Out-String"
     For LAN targets (192.168.x.x), WSL mrsh works directly.
   - RELAY FALLBACK: When LAN and Tailscale both fail, try DeviceID:
       mrsh -h <DeviceID> exec '<cmd>'
