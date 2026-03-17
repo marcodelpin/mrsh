@@ -217,6 +217,16 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
     }
 }
 
+/// Global flag: when true, TOFU verifier accepts changed host keys and updates known_hosts.
+/// Set via `--accept-host-key` CLI flag or `MRSH_ACCEPT_HOST_KEY=1` env var.
+static ACCEPT_CHANGED_HOST_KEY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Enable accepting changed host keys (updates known_hosts instead of rejecting).
+pub fn set_accept_host_key(accept: bool) {
+    ACCEPT_CHANGED_HOST_KEY.store(accept, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Trust-On-First-Use certificate verifier.
 /// Saves server cert fingerprint on first connect, verifies on subsequent connects.
 /// Format: one line per host — `hostname SHA256:base64fingerprint`
@@ -255,17 +265,20 @@ impl TofuVerifier {
         let mut cache = self.cache.lock().unwrap();
         cache.insert(hostname.to_string(), fingerprint.to_string());
 
-        // Append to file
+        // Rewrite entire file (handles both new and changed entries)
         if let Some(parent) = self.known_hosts_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
-            .append(true)
+            .write(true)
+            .truncate(true)
             .open(&self.known_hosts_path)
         {
-            let _ = writeln!(f, "{} {}", hostname, fingerprint);
+            for (host, fp) in cache.iter() {
+                let _ = writeln!(f, "{} {}", host, fp);
+            }
         }
     }
 
@@ -295,9 +308,19 @@ impl rustls::client::danger::ServerCertVerifier for TofuVerifier {
             if *known_fp == fingerprint {
                 return Ok(rustls::client::danger::ServerCertVerified::assertion());
             }
-            // Fingerprint mismatch — possible MITM
+            // Fingerprint mismatch — accept if flag set, reject otherwise
+            if ACCEPT_CHANGED_HOST_KEY.load(std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!(
+                    "TOFU: host key changed for {} — accepting new key {}",
+                    hostname,
+                    fingerprint
+                );
+                drop(cache);
+                self.save_host(&hostname, &fingerprint);
+                return Ok(rustls::client::danger::ServerCertVerified::assertion());
+            }
             tracing::error!(
-                "TOFU: host key changed for {}! Expected {}, got {}. Possible MITM attack.",
+                "TOFU: host key changed for {}! Expected {}, got {}. Use --accept-host-key to accept.",
                 hostname,
                 known_fp,
                 fingerprint

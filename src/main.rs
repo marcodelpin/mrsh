@@ -114,6 +114,10 @@ struct Cli {
     #[arg(long = "no-mux")]
     no_mux: bool,
 
+    /// Accept changed host keys (update known_hosts instead of rejecting)
+    #[arg(long = "accept-host-key")]
+    accept_host_key: bool,
+
     /// Stop running master for this host
     #[arg(long = "mux-stop")]
     mux_stop: bool,
@@ -208,6 +212,11 @@ fn main() -> Result<()> {
     }
 
     let cli = Cli::parse();
+
+    // Accept changed host keys if flag or env var set
+    if cli.accept_host_key || std::env::var("MRSH_ACCEPT_HOST_KEY").is_ok() {
+        mrsh_core::tls::set_accept_host_key(true);
+    }
 
     // Determine if we're running in server mode (needs audit log to file)
     let is_server_mode = cli.console
