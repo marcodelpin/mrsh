@@ -3176,7 +3176,7 @@ AI USAGE:
        Tray mode: use schtask with /ru <USERNAME> (NOT /ru SYSTEM).
     1. BEFORE touching the service, verify alternative access (SSH, WinRM, RDP).
        If mrsh is the ONLY access channel, DO NOT proceed — ask for recovery path.
-    2. Canonical install directory: C:\ProgramData\mrsh\
+    2. Canonical install directory: C:\ProgramData\mrsh\ (auto-migrates from C:\ProgramData\remote-shell\)
     3. Push new binary alongside: mrsh push deploy/rsh.exe "C:\ProgramData\mrsh\rsh-new.exe"
     4. Create ONE schtask (never overwrite without verifying outcome of previous).
     5. Wait 15s, verify: mrsh ping
