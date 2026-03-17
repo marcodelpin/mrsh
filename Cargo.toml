@@ -1,18 +1,18 @@
 [workspace]
 members = [
-    "crates/rsh-core",
-    "crates/rsh-transfer",
-    "crates/rsh-relay",
-    "crates/rsh-server",
-    "crates/rsh-client",
+    "crates/mrsh-core",
+    "crates/mrsh-transfer",
+    "crates/mrsh-relay",
+    "crates/mrsh-server",
+    "crates/mrsh-client",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "1.2.0"
+version = "1.3.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/marcodelpin/rsh"
+repository = "https://github.com/marcodelpin/mrsh"
 
 [workspace.dependencies]
 # Async runtime
@@ -64,25 +64,25 @@ anyhow = "1"
 thiserror = "2"
 
 # Workspace crates (internal)
-rsh-core = { path = "crates/rsh-core" }
-rsh-transfer = { path = "crates/rsh-transfer" }
-rsh-relay = { path = "crates/rsh-relay" }
-rsh-server = { path = "crates/rsh-server" }
-rsh-client = { path = "crates/rsh-client" }
+mrsh-core = { path = "crates/mrsh-core" }
+mrsh-transfer = { path = "crates/mrsh-transfer" }
+mrsh-relay = { path = "crates/mrsh-relay" }
+mrsh-server = { path = "crates/mrsh-server" }
+mrsh-client = { path = "crates/mrsh-client" }
 
 [package]
-name = "rsh"
+name = "mrsh"
 version.workspace = true
 edition.workspace = true
 
 [[bin]]
-name = "rsh"
+name = "mrsh"
 path = "src/main.rs"
 
 [dependencies]
-rsh-core.workspace = true
-rsh-client.workspace = true
-rsh-relay.workspace = true
+mrsh-core.workspace = true
+mrsh-client.workspace = true
+mrsh-relay.workspace = true
 clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -93,7 +93,7 @@ chrono.workspace = true
 serde_json.workspace = true
 notify = { version = "7", default-features = false, features = ["macos_kqueue"] }
 
-rsh-server.workspace = true
+mrsh-server.workspace = true
 quinn = { workspace = true, optional = true }
 tokio-util = "0.7"
 tokio-rustls.workspace = true
@@ -112,7 +112,7 @@ nix = { version = "0.29", features = ["signal"] }
 windows = { version = "0.61", features = ["Win32_System_Console", "Win32_UI_WindowsAndMessaging", "Win32_Storage_FileSystem"] }
 
 [features]
-quic = ["rsh-server/quic", "rsh-client/quic", "quinn"]
+quic = ["mrsh-server/quic", "mrsh-client/quic", "quinn"]
 
 [dev-dependencies]
 tempfile = "3"

@@ -1258,6 +1258,166 @@ dependencies = [
 ]
 
 [[package]]
+name = "mrsh"
+version = "1.3.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chrono",
+ "clap",
+ "dirs 5.0.1",
+ "ed25519-dalek",
+ "libc",
+ "mrsh-client",
+ "mrsh-core",
+ "mrsh-relay",
+ "mrsh-server",
+ "nix",
+ "notify",
+ "quinn",
+ "rand 0.8.5",
+ "serde_json",
+ "sha2",
+ "ssh-key",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "windows",
+ "winres",
+]
+
+[[package]]
+name = "mrsh-client"
+version = "1.3.0"
+dependencies = [
+ "anyhow",
+ "atty",
+ "base64",
+ "chrono",
+ "crossterm",
+ "dirs 5.0.1",
+ "flate2",
+ "hex",
+ "mrsh-core",
+ "mrsh-relay",
+ "mrsh-transfer",
+ "quinn",
+ "rand 0.8.5",
+ "ratatui",
+ "rpassword",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+]
+
+[[package]]
+name = "mrsh-core"
+version = "1.3.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "dirs 6.0.0",
+ "ed25519-dalek",
+ "filetime",
+ "glob",
+ "rand 0.8.5",
+ "rcgen",
+ "regex",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "sha2",
+ "ssh-key",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tokio-rustls",
+ "totp-rs",
+ "tracing",
+ "zstd",
+]
+
+[[package]]
+name = "mrsh-relay"
+version = "1.3.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "mrsh-core",
+ "prost",
+ "prost-build",
+ "rand 0.8.5",
+ "serde",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "mrsh-server"
+version = "1.3.0"
+dependencies = [
+ "adler32",
+ "anyhow",
+ "base64",
+ "chrono",
+ "ed25519-dalek",
+ "flate2",
+ "image",
+ "libc",
+ "libloading",
+ "md-5",
+ "mrsh-core",
+ "mrsh-relay",
+ "mrsh-transfer",
+ "nix",
+ "quinn",
+ "rand 0.8.5",
+ "rustls",
+ "serde",
+ "serde_json",
+ "socket2 0.5.10",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tracing",
+ "windows",
+ "windows-service",
+]
+
+[[package]]
+name = "mrsh-transfer"
+version = "1.3.0"
+dependencies = [
+ "adler32",
+ "anyhow",
+ "base64",
+ "md-5",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "multimap"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1949,166 +2109,6 @@ dependencies = [
  "spki",
  "subtle",
  "zeroize",
-]
-
-[[package]]
-name = "rsh"
-version = "1.2.0"
-dependencies = [
- "anyhow",
- "base64",
- "chrono",
- "clap",
- "dirs 5.0.1",
- "ed25519-dalek",
- "libc",
- "nix",
- "notify",
- "quinn",
- "rand 0.8.5",
- "rsh-client",
- "rsh-core",
- "rsh-relay",
- "rsh-server",
- "serde_json",
- "sha2",
- "ssh-key",
- "tempfile",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "windows",
- "winres",
-]
-
-[[package]]
-name = "rsh-client"
-version = "1.2.0"
-dependencies = [
- "anyhow",
- "atty",
- "base64",
- "chrono",
- "crossterm",
- "dirs 5.0.1",
- "flate2",
- "hex",
- "quinn",
- "rand 0.8.5",
- "ratatui",
- "rpassword",
- "rsh-core",
- "rsh-relay",
- "rsh-transfer",
- "rustls",
- "serde",
- "serde_json",
- "sha2",
- "tar",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-rustls",
- "tracing",
-]
-
-[[package]]
-name = "rsh-core"
-version = "1.2.0"
-dependencies = [
- "anyhow",
- "base64",
- "dirs 6.0.0",
- "ed25519-dalek",
- "filetime",
- "glob",
- "rand 0.8.5",
- "rcgen",
- "regex",
- "rustls",
- "rustls-pemfile",
- "serde",
- "serde_json",
- "sha2",
- "ssh-key",
- "tempfile",
- "thiserror 2.0.18",
- "time",
- "tokio",
- "tokio-rustls",
- "totp-rs",
- "tracing",
- "zstd",
-]
-
-[[package]]
-name = "rsh-relay"
-version = "1.2.0"
-dependencies = [
- "anyhow",
- "hex",
- "prost",
- "prost-build",
- "rand 0.8.5",
- "rsh-core",
- "serde",
- "sha2",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "rsh-server"
-version = "1.2.0"
-dependencies = [
- "adler32",
- "anyhow",
- "base64",
- "chrono",
- "ed25519-dalek",
- "flate2",
- "image",
- "libc",
- "libloading",
- "md-5",
- "nix",
- "quinn",
- "rand 0.8.5",
- "rsh-core",
- "rsh-relay",
- "rsh-transfer",
- "rustls",
- "serde",
- "serde_json",
- "socket2 0.5.10",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "tracing",
- "windows",
- "windows-service",
-]
-
-[[package]]
-name = "rsh-transfer"
-version = "1.2.0"
-dependencies = [
- "adler32",
- "anyhow",
- "base64",
- "md-5",
- "rmp-serde",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
 ]
 
 [[package]]
