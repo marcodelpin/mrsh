@@ -3167,7 +3167,16 @@ AI USAGE:
     mrsh wake <host|MAC>      Wake-on-LAN (send magic packet, MAC from config)
     mrsh fleet status         Show version/status of all configured hosts
 
-  SELF-UPDATE:
+  DEPLOYMENT TO NEW/BROKEN MACHINE:
+  - ALWAYS use `mrsh pack` to generate an installer. NEVER manually copy naked binaries.
+    mrsh pack --platform windows --key ~/.ssh/id_ed25519.pub --port 8822 \
+              --rendezvous-server rdv.pinesoft.dev:21116 -o installer.exe
+    The installer bundles: binary + authorized_keys + firewall rules + service registration.
+    User copies installer to target, runs as admin, done.
+  - For fleet updates (already-running machines): use `mrsh self-update` or `mrsh fleet update`.
+    Do NOT use manual bat/ps1 scripts — self-update handles stop/swap/start automatically.
+
+  SELF-UPDATE (existing machines):
   - CRITICAL: NEVER kill/stop/restart mrsh through its own connection using /ru SYSTEM.
     SYSTEM cannot start tray-mode apps in user desktop session — locks you out.
   - SAFE UPDATE PROCEDURE:
