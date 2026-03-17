@@ -123,23 +123,22 @@ fn replace_binary_linux(new_binary: &str) -> Result<String> {
     let _ = std::fs::remove_file(new_binary);
 
     // Try to restart via systemd (non-blocking, best effort)
-    let systemd_restart = std::process::Command::new("systemctl")
-        .args(["restart", "rsh"])
-        .output();
+    // Try mrsh first, then legacy rsh service name
+    let restarted = ["mrsh", "rsh"].iter().any(|svc| {
+        std::process::Command::new("systemctl")
+            .args(["restart", svc])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    });
 
-    match systemd_restart {
-        Ok(out) if out.status.success() => {
-            Ok(format!(
-                "updated {} and restarted via systemd",
-                exe_path
-            ))
-        }
-        _ => {
-            Ok(format!(
-                "updated {} (manual restart required — not running as systemd service)",
-                exe_path
-            ))
-        }
+    if restarted {
+        Ok(format!("updated {} and restarted via systemd", exe_path))
+    } else {
+        Ok(format!(
+            "updated {} (manual restart required — not running as systemd service)",
+            exe_path
+        ))
     }
 }
 
@@ -156,12 +155,28 @@ fn schedule_update_windows(new_binary: &str) -> Result<String> {
     let backup_path = format!("{}.bak", exe_path);
     let bat_path = format!("{}\\rsh-update.bat", std::env::temp_dir().to_string_lossy());
 
+    // Detect actual service name (mrsh or legacy rsh)
+    let svc_name = {
+        let check = Command::new("sc").args(["query", "mrsh"]).output();
+        if check.map(|o| o.status.success()).unwrap_or(false) {
+            "mrsh"
+        } else {
+            "rsh" // legacy service name
+        }
+    };
+
+    let exe_name = std::path::Path::new(&exe_path)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
     // Write update bat script
     let bat_content = format!(
         r#"@echo off
-net stop rsh
+net stop {svc}
 timeout /t 3 /nobreak >nul
-taskkill /F /IM rsh.exe 2>nul
+taskkill /F /IM {exe_name} 2>nul
 timeout /t 2 /nobreak >nul
 copy /y "{exe}" "{backup}"
 copy /y "{new}" "{exe}"
@@ -169,10 +184,12 @@ IF ERRORLEVEL 1 (
     copy /y "{backup}" "{exe}"
     echo ROLLBACK: restored from backup >> "{exe}.update.log"
 )
-net start rsh
+net start {svc}
 del "{new}"
-schtasks /delete /tn rsh-self-update /f
+schtasks /delete /tn mrsh-self-update /f
 "#,
+        svc = svc_name,
+        exe_name = exe_name,
         exe = exe_path,
         backup = backup_path,
         new = new_binary,

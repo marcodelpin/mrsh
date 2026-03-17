@@ -3291,10 +3291,40 @@ fn load_allowed_tunnels(data_dir: &std::path::Path) -> Vec<String> {
 fn server_data_dir() -> std::path::PathBuf {
     #[cfg(target_os = "windows")]
     {
-        // Check canonical service location first
-        let service_dir = std::path::PathBuf::from(r"C:\ProgramData\mrsh");
-        if service_dir.exists() {
-            return service_dir;
+        let new_dir = std::path::PathBuf::from(r"C:\ProgramData\mrsh");
+        let legacy_dir = std::path::PathBuf::from(r"C:\ProgramData\remote-shell");
+
+        // New location exists — use it
+        if new_dir.exists() {
+            return new_dir;
+        }
+
+        // Legacy location exists — migrate critical files then use new dir
+        if legacy_dir.exists() {
+            if std::fs::create_dir_all(&new_dir).is_ok() {
+                for name in &[
+                    "authorized_keys",
+                    "id_ed25519",
+                    "id_ed25519.pub",
+                    "device_id",
+                    "tls_cert.pem",
+                    "tls_key.pem",
+                    "banner.txt",
+                    "revoked_keys",
+                ] {
+                    let src = legacy_dir.join(name);
+                    let dst = new_dir.join(name);
+                    if src.exists() && !dst.exists() {
+                        let _ = std::fs::copy(&src, &dst);
+                    }
+                }
+                tracing::info!(
+                    "migrated data from {} to {}",
+                    legacy_dir.display(),
+                    new_dir.display()
+                );
+                return new_dir;
+            }
         }
 
         // Fall back to user home
@@ -3302,8 +3332,7 @@ fn server_data_dir() -> std::path::PathBuf {
             return std::path::PathBuf::from(home).join(".mrsh");
         }
 
-        // Last resort
-        return service_dir;
+        new_dir
     }
 
     #[cfg(not(target_os = "windows"))]
