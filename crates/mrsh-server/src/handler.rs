@@ -244,6 +244,9 @@ fn check_permission(req: &protocol::Request, perms: &auth::KeyPermissions) -> Op
     match req.req_type.as_str() {
         // Exec commands
         "exec" | "exec-as-user" => {
+            #[cfg(feature = "no-exec")]
+            return Some("exec disabled in this build".to_string());
+            #[cfg(not(feature = "no-exec"))]
             if !perms.allow_exec {
                 return Some("exec not permitted for this key".to_string());
             }
@@ -262,6 +265,9 @@ fn check_permission(req: &protocol::Request, perms: &auth::KeyPermissions) -> Op
         }
         // Shell commands
         "shell" | "shell-persistent" => {
+            #[cfg(feature = "no-shell")]
+            return Some("shell disabled in this build".to_string());
+            #[cfg(not(feature = "no-shell"))]
             if !perms.allow_shell {
                 return Some("shell not permitted for this key".to_string());
             }
@@ -287,7 +293,6 @@ fn check_permission(req: &protocol::Request, perms: &auth::KeyPermissions) -> Op
                     }
                 }
                 _ => {
-                    // Generic sync: require both push and pull
                     if !perms.allow_push || !perms.allow_pull {
                         return Some("sync not permitted for this key".to_string());
                     }
@@ -297,14 +302,29 @@ fn check_permission(req: &protocol::Request, perms: &auth::KeyPermissions) -> Op
         // Native commands — check specific permissions based on command content
         "native" => {
             let cmd = req.command.as_deref().unwrap_or("");
-            if cmd.starts_with("clip-") && !perms.allow_clipboard {
-                return Some("clipboard not permitted for this key".to_string());
+            if cmd.starts_with("clip-") {
+                #[cfg(feature = "no-clipboard")]
+                return Some("clipboard disabled in this build".to_string());
+                #[cfg(not(feature = "no-clipboard"))]
+                if !perms.allow_clipboard {
+                    return Some("clipboard not permitted for this key".to_string());
+                }
             }
-            if (cmd == "reboot" || cmd == "shutdown" || cmd == "sleep" || cmd == "lock") && !perms.allow_reboot {
-                return Some("reboot/shutdown not permitted for this key".to_string());
+            if cmd == "reboot" || cmd == "shutdown" || cmd == "sleep" || cmd == "lock" {
+                #[cfg(feature = "no-reboot")]
+                return Some("reboot/shutdown disabled in this build".to_string());
+                #[cfg(not(feature = "no-reboot"))]
+                if !perms.allow_reboot {
+                    return Some("reboot/shutdown not permitted for this key".to_string());
+                }
             }
-            if cmd == "screenshot" && !perms.allow_screenshot {
-                return Some("screenshot not permitted for this key".to_string());
+            if cmd == "screenshot" {
+                #[cfg(feature = "no-screenshot")]
+                return Some("screenshot disabled in this build".to_string());
+                #[cfg(not(feature = "no-screenshot"))]
+                if !perms.allow_screenshot {
+                    return Some("screenshot not permitted for this key".to_string());
+                }
             }
         }
         // Input (GUI automation) commands
@@ -315,12 +335,18 @@ fn check_permission(req: &protocol::Request, perms: &auth::KeyPermissions) -> Op
         }
         // Screenshot
         "screenshot" => {
+            #[cfg(feature = "no-screenshot")]
+            return Some("screenshot disabled in this build".to_string());
+            #[cfg(not(feature = "no-screenshot"))]
             if !perms.allow_screenshot {
                 return Some("screenshot not permitted for this key".to_string());
             }
         }
         // Self-update
         "self-update" => {
+            #[cfg(feature = "no-self-update")]
+            return Some("self-update disabled in this build".to_string());
+            #[cfg(not(feature = "no-self-update"))]
             if !perms.allow_self_update {
                 return Some("self-update not permitted for this key".to_string());
             }

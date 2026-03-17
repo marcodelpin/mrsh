@@ -113,6 +113,15 @@ windows = { version = "0.61", features = ["Win32_System_Console", "Win32_UI_Wind
 
 [features]
 quic = ["mrsh-server/quic", "mrsh-client/quic", "quinn"]
+no-toast = []
+no-exec = []
+no-shell = []
+no-reboot = []
+no-screenshot = []
+no-self-update = []
+no-clipboard = []
+no-relay = []
+read-only = ["no-exec", "no-shell"]
 
 [dev-dependencies]
 tempfile = "3"

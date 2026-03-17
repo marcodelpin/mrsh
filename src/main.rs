@@ -132,6 +132,22 @@ struct Cli {
     args: Vec<String>,
 }
 
+/// Default server port. Override at compile time: MRSH_DEFAULT_PORT=9822
+const DEFAULT_PORT: u16 = match option_env!("MRSH_DEFAULT_PORT") {
+    Some(s) => {
+        // const-compatible u16 parse
+        let b = s.as_bytes();
+        let mut n: u16 = 0;
+        let mut i = 0;
+        while i < b.len() {
+            n = n * 10 + (b[i] - b'0') as u16;
+            i += 1;
+        }
+        n
+    }
+    None => 8822,
+};
+
 /// Known local subcommands that don't require -h (used in server mode detection).
 #[cfg(target_os = "windows")]
 const LOCAL_COMMANDS: &[&str] = &["version", "fleet", "wake", "cfg", "config-edit", "connect", "log", "logs", "dash", "dashboard", "keygen", "totp-setup", "totp-verify", "pack", "install-pack", "relay", "rdv", "rendezvous", "discover", "nat"];
@@ -290,7 +306,7 @@ fn main() -> Result<()> {
     }
     if cli.console {
         let rt = tokio::runtime::Runtime::new()?;
-        return rt.block_on(run_server_mode(cli.port.unwrap_or(8822), false));
+        return rt.block_on(run_server_mode(cli.port.unwrap_or(DEFAULT_PORT), false));
     }
 
     // ── Explicit tray mode (Windows) ─────────────────────────
@@ -305,7 +321,7 @@ fn main() -> Result<()> {
     // ── Linux daemon mode ────────────────────────────────────
     #[cfg(not(target_os = "windows"))]
     if cli.daemon {
-        let port = cli.port.unwrap_or(8822);
+        let port = cli.port.unwrap_or(DEFAULT_PORT);
         mrsh_server::service::run_as_service(move |cancel| {
             let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
             rt.block_on(async {
@@ -324,7 +340,7 @@ fn main() -> Result<()> {
     {
         // Explicit --service flag: SCM launched us with this flag, go straight to dispatch.
         if cli.service {
-            let port = cli.port.unwrap_or(8822);
+            let port = cli.port.unwrap_or(DEFAULT_PORT);
             mrsh_server::service::run_as_service(move |cancel| {
                 let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
                 rt.block_on(async {
@@ -343,7 +359,7 @@ fn main() -> Result<()> {
             LOCAL_COMMANDS.contains(&a.as_str()) || a == "help" || a == "recording"
         });
         if cli.host.is_none() && !is_local_cmd {
-            let port = cli.port.unwrap_or(8822);
+            let port = cli.port.unwrap_or(DEFAULT_PORT);
             let result = mrsh_server::service::run_as_service(move |cancel| {
                 let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
                 rt.block_on(async {
@@ -389,7 +405,13 @@ async fn async_main(cli: Cli) -> Result<()> {
     // ── Local commands (no -h needed) ────────────────────────
     match cmd {
         "version" => {
-            println!("mrsh {} (rust)", env!("CARGO_PKG_VERSION"));
+            let version = env!("CARGO_PKG_VERSION");
+            let suffix = option_env!("MRSH_VERSION_SUFFIX").unwrap_or("");
+            if suffix.is_empty() {
+                println!("mrsh {}", version);
+            } else {
+                println!("mrsh {}-{}", version, suffix);
+            }
             return Ok(());
         }
         "fleet" => {
@@ -548,7 +570,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             eprintln!("error: -h <host> required for --mux-stop");
             std::process::exit(1);
         });
-        return mrsh_client::mux::stop_master(host, cli.port.unwrap_or(8822)).await;
+        return mrsh_client::mux::stop_master(host, cli.port.unwrap_or(DEFAULT_PORT)).await;
     }
 
     // ── Server mode: no -h, no local command, on Windows ────
@@ -577,7 +599,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             cli.port.is_none() && cfg_port != 8822, // config specified non-default port
         )
     } else {
-        (host.to_string(), cli.port.unwrap_or(8822), false)
+        (host.to_string(), cli.port.unwrap_or(DEFAULT_PORT), false)
     };
     // Auto-try ports when neither -p nor config specified a port
     let auto_try_ports = !port_explicit && !port_from_config;
@@ -1029,7 +1051,10 @@ async fn async_main(cli: Cli) -> Result<()> {
     }
 
     let mut client = if let Some(ref dev_id) = device_id {
+        #[cfg(feature = "no-relay")]
+        bail!("relay connections disabled in this build");
         // Relay path: resolve via hbbs, connect via P2P or hbbr
+        #[cfg(not(feature = "no-relay"))]
         let relay_opts = mrsh_client::relay_connect::RelayConnectOptions {
             device_id: dev_id.clone(),
             rendezvous_server: config
@@ -2060,7 +2085,7 @@ fn run_install_pack(args: &[String]) -> Result<()> {
             "--port" => {
                 i += 1;
                 if let Some(p) = args.get(i) {
-                    port = p.parse().unwrap_or(8822);
+                    port = p.parse().unwrap_or(DEFAULT_PORT);
                 }
             }
             "--nas-auth" => {
@@ -2098,7 +2123,7 @@ fn run_install_pack(args: &[String]) -> Result<()> {
                     .strip_prefix("--port=")
                     .unwrap()
                     .parse()
-                    .unwrap_or(8822);
+                    .unwrap_or(DEFAULT_PORT);
             }
             other if other.starts_with("--nas-auth=") => {
                 nas_auth = Some(other.strip_prefix("--nas-auth=").unwrap().to_string());
@@ -2780,8 +2805,14 @@ async fn run_server_mode_inner(
     let ctx = Arc::new(ServerContext {
         authorized_keys,
         revoked_keys,
-        server_version: env!("CARGO_PKG_VERSION").to_string(),
-        banner: None,
+        server_version: {
+            let v = env!("CARGO_PKG_VERSION").to_string();
+            match option_env!("MRSH_VERSION_SUFFIX") {
+                Some(s) if !s.is_empty() => format!("{}-{}", v, s),
+                _ => v,
+            }
+        },
+        banner: option_env!("MRSH_BANNER").map(|s| s.to_string()),
         caps,
         session_store: session::SessionStore::new(),
         rate_limiter: mrsh_server::ratelimit::AuthRateLimiter::new(),
@@ -2806,7 +2837,11 @@ async fn run_server_mode_inner(
     // Spawn rendezvous registration loop with relay notification support.
     {
         let user_config = mrsh_core::config::Config::load();
-        let rdv_servers = user_config.get_rendezvous_servers();
+        // Compile-time override: MRSH_RDV_SERVER=host:port bakes the rendezvous server
+        let rdv_servers = match option_env!("MRSH_RDV_SERVER") {
+            Some(rdv) if !rdv.is_empty() => vec![rdv.to_string()],
+            _ => user_config.get_rendezvous_servers(),
+        };
         let device_id = resolve_device_id(&user_config, &data_dir);
         let rdv_key = user_config.rendezvous_key.clone().unwrap_or_default();
         // Compute group_hash from enrollment_token (if present in config).
