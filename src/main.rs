@@ -176,8 +176,9 @@ fn main() -> Result<()> {
                     }
                 }
                 // After attach/alloc, reopen std handles so Rust's stdin/stdout
-                // point to the (re)attached console — required for crossterm TUI.
-                if is_tui_cmd {
+                // point to the (re)attached console. Without this, GUI subsystem
+                // binary has null stdout → print! output lost (exec from PowerShell).
+                {
                     use windows::Win32::Storage::FileSystem::{
                         CreateFileW, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
                         FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
