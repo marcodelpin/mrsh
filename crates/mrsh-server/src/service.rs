@@ -53,6 +53,21 @@ pub fn install_service(exe_path: &str) -> anyhow::Result<()> {
 
     info!("service installed: {}", SERVICE_NAME);
 
+    // Open firewall for mrsh ports (LAN access — Tailscale only covers its own IP)
+    for port in &[8822u16, 9822] {
+        let rule_name = format!("mrsh-inbound-{}", port);
+        let _ = std::process::Command::new("netsh")
+            .args([
+                "advfirewall", "firewall", "add", "rule",
+                &format!("name={}", rule_name),
+                "dir=in", "action=allow", "protocol=TCP",
+                &format!("localport={}", port),
+                "profile=private,domain",
+            ])
+            .output();
+        info!("firewall rule added: {} (TCP {})", rule_name, port);
+    }
+
     // Register tray companion at user logon — ensures visible tray icon
     // whenever someone is logged in, preventing fully hidden operation.
     if let Err(e) = register_tray_logon_task(exe_path) {
@@ -144,6 +159,17 @@ pub fn uninstall_service() -> anyhow::Result<()> {
     let _ = std::process::Command::new("schtasks")
         .args(["/delete", "/tn", TRAY_TASK_NAME, "/f"])
         .output();
+
+    // Remove firewall rules
+    for port in &[8822u16, 9822] {
+        let rule_name = format!("mrsh-inbound-{}", port);
+        let _ = std::process::Command::new("netsh")
+            .args([
+                "advfirewall", "firewall", "delete", "rule",
+                &format!("name={}", rule_name),
+            ])
+            .output();
+    }
 
     info!("service uninstalled: {}", SERVICE_NAME);
     Ok(())
