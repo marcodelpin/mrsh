@@ -922,4 +922,45 @@ mod tests {
         let table = format_status_table_inner(&[s], false);
         assert!(!table.contains("CAPS"), "non-verbose table must not have CAPS column");
     }
+
+    #[test]
+    fn hbbs_online_threshold_fresh_peer_is_online() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // Peer registered 10 seconds ago — well within 90s threshold
+        let last_seen = now - 10;
+        let online = now.saturating_sub(last_seen) < HBBS_ONLINE_THRESHOLD_SECS;
+        assert!(online, "peer seen 10s ago should be online");
+    }
+
+    #[test]
+    fn hbbs_online_threshold_stale_peer_is_offline() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // Peer registered 100 seconds ago — beyond 90s threshold
+        let last_seen = now - 100;
+        let online = now.saturating_sub(last_seen) < HBBS_ONLINE_THRESHOLD_SECS;
+        assert!(!online, "peer seen 100s ago should be offline");
+    }
+
+    #[test]
+    fn hbbs_online_threshold_boundary() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // Exactly at threshold — should be offline (< not <=)
+        let last_seen = now - HBBS_ONLINE_THRESHOLD_SECS;
+        let online = now.saturating_sub(last_seen) < HBBS_ONLINE_THRESHOLD_SECS;
+        assert!(!online, "peer seen exactly at threshold should be offline");
+
+        // One second before threshold — should be online
+        let last_seen = now - HBBS_ONLINE_THRESHOLD_SECS + 1;
+        let online = now.saturating_sub(last_seen) < HBBS_ONLINE_THRESHOLD_SECS;
+        assert!(online, "peer seen 1s before threshold should be online");
+    }
 }
