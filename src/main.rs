@@ -168,16 +168,18 @@ fn compute_timeout_secs(explicit: u64, cmd: &str) -> u64 {
 
 fn main() -> Result<()> {
     // Reattach to parent console for CLI output (we're a windowsgui subsystem binary).
-    // Skip for --tray mode (tray is a GUI app, no console needed — AllocConsole causes
-    // 0xC0000409 crashes on Windows 10 IoT Enterprise LTSC build 19044).
+    // Skip for --tray and --service modes:
+    //   --tray: GUI app, no console needed — AllocConsole causes 0xC0000409 on Win10 IoT LTSC
+    //   --service: SCM background process, output goes to audit.log — AllocConsole + CONOUT$
+    //     on LTSC can prevent service startup (v1.3.3 rollback on mediacenter)
     #[cfg(target_os = "windows")]
     {
-        let is_tray_mode = std::env::args().any(|a| a == "--tray");
+        let needs_no_console = std::env::args().any(|a| a == "--tray" || a == "--service");
         // TUI commands need a visible, fully functional console
         let is_tui_cmd = std::env::args().any(|a| {
             matches!(a.as_str(), "dash" | "dashboard" | "logs" | "cfg" | "config-edit" | "browse" | "sftp" | "connect")
         });
-        if !is_tray_mode {
+        if !needs_no_console {
             unsafe {
                 use windows::Win32::System::Console::{
                     AllocConsole, AttachConsole, ATTACH_PARENT_PROCESS,
@@ -284,20 +286,16 @@ fn main() -> Result<()> {
         let log_prefix = if std::env::args().any(|a| a == "--tray") { "audit-tray.log" } else { "audit.log" };
         #[cfg(not(target_os = "windows"))]
         let log_prefix = "audit.log";
-        let file_appender = tracing_appender::rolling::daily(&data_dir, log_prefix);
-        let file_layer = tracing_subscriber::fmt::layer()
-            .with_writer(file_appender)
-            .with_ansi(false);
         let filter = tracing_subscriber::EnvFilter::new(match cli.verbose {
             0 => "info",
             1 => "info",
             _ => "debug",
         });
 
-        // Tray mode has no console — skip stderr layer to avoid writing to
-        // invalid handle (causes 0xC0000409 on Windows 10 IoT LTSC).
+        // Tray/service modes have no console — skip stderr layer to avoid writing
+        // to invalid handle (causes 0xC0000409 on Windows 10 IoT LTSC).
         #[cfg(target_os = "windows")]
-        let has_console = !std::env::args().any(|a| a == "--tray");
+        let has_console = !std::env::args().any(|a| a == "--tray" || a == "--service");
         #[cfg(not(target_os = "windows"))]
         let has_console = true;
 
@@ -306,6 +304,20 @@ fn main() -> Result<()> {
         } else {
             None
         };
+
+        // Use builder to avoid panic on permission denied (e.g. service data dir
+        // not yet writable, or SYSTEM user lacking access during migration).
+        let file_layer = tracing_appender::rolling::RollingFileAppender::builder()
+            .rotation(tracing_appender::rolling::Rotation::DAILY)
+            .filename_prefix(log_prefix)
+            .build(&data_dir)
+            .ok()
+            .map(|appender| {
+                tracing_subscriber::fmt::layer()
+                    .with_writer(appender)
+                    .with_ansi(false)
+            });
+
         tracing_subscriber::registry()
             .with(filter)
             .with(stderr_layer)

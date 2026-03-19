@@ -37,7 +37,7 @@ pub fn generate(opts: &InstallPackOptions) -> Result<PathBuf> {
 
     // Collect all pack contents in memory
     let binary_src = find_binary(&opts.binary, is_windows)?;
-    let binary_name = if is_windows { "rsh.exe" } else { "rsh" };
+    let binary_name = if is_windows { "mrsh.exe" } else { "mrsh" };
     let binary_data = std::fs::read(&binary_src).with_context(|| {
         format!("read binary: {}", binary_src.display())
     })?;
@@ -129,7 +129,7 @@ fn generate_self_extracting_sh(
 ) -> Result<PathBuf> {
     let out_path = match &opts.output {
         Some(p) => p.clone(),
-        None => PathBuf::from(format!("rsh-{}-linux-install.sh", version)),
+        None => PathBuf::from(format!("mrsh-{}-linux-install.sh", version)),
     };
 
     // Build tar.gz in memory
@@ -140,7 +140,7 @@ fn generate_self_extracting_sh(
             let mut ar = tar::Builder::new(gz);
 
             // Add binary
-            add_tar_entry(&mut ar, "rsh", binary_data, 0o755)?;
+            add_tar_entry(&mut ar, "mrsh", binary_data, 0o755)?;
 
             // Add authorized_keys
             add_tar_entry(&mut ar, "authorized_keys", auth_keys.as_bytes(), 0o600)?;
@@ -246,7 +246,7 @@ fn generate_nsis_installer(
 ) -> Result<PathBuf> {
     let out_path = match &opts.output {
         Some(p) => p.clone(),
-        None => PathBuf::from(format!("rsh-{}-windows-install.exe", version)),
+        None => PathBuf::from(format!("mrsh-{}-windows-install.exe", version)),
     };
 
     // Verify makensis is available
@@ -256,8 +256,8 @@ fn generate_nsis_installer(
     let tmp = tempfile::tempdir().context("create temp dir for NSIS")?;
     let src_dir = tmp.path();
 
-    std::fs::write(src_dir.join("rsh.exe"), binary_data)
-        .context("write rsh.exe to temp")?;
+    std::fs::write(src_dir.join("mrsh.exe"), binary_data)
+        .context("write mrsh.exe to temp")?;
     std::fs::write(src_dir.join("authorized_keys"), auth_keys.as_bytes())
         .context("write authorized_keys to temp")?;
     std::fs::write(src_dir.join("install.bat"), install_script.as_bytes())
@@ -313,7 +313,7 @@ fn generate_nsi_script(version: &str, port: u16, has_startup: bool, has_config: 
 
     // Header
     s.push_str("!include \"MUI2.nsh\"\n\n");
-    s.push_str(&format!("Name \"rsh {}\"\n", version));
+    s.push_str(&format!("Name \"mrsh {}\"\n", version));
     s.push_str("OutFile \"${OUTFILE}\"\n");
     s.push_str("InstallDir \"C:\\ProgramData\\mrsh\"\n");
     s.push_str("RequestExecutionLevel admin\n");
@@ -322,7 +322,7 @@ fn generate_nsi_script(version: &str, port: u16, has_startup: bool, has_config: 
     // Branding
     s.push_str(&format!("!define VERSION \"{}\"\n", version));
     s.push_str(&format!("!define PORT \"{}\"\n", port));
-    s.push_str("BrandingText \"rsh ${VERSION}\"\n\n");
+    s.push_str("BrandingText \"mrsh ${VERSION}\"\n\n");
 
     // Pages
     s.push_str("!insertmacro MUI_PAGE_INSTFILES\n");
@@ -334,12 +334,13 @@ fn generate_nsi_script(version: &str, port: u16, has_startup: bool, has_config: 
 
     // Stop existing service if running (ignore errors)
     s.push_str("    DetailPrint \"Stopping existing mrsh service (if any)...\"\n");
-    s.push_str("    nsExec::ExecToStack 'net stop rsh'\n");
+    s.push_str("    nsExec::ExecToStack 'net stop mrsh'\n");
+    s.push_str("    nsExec::ExecToStack 'net stop rsh'\n"); // legacy service name
     s.push_str("    Pop $0\n\n");
 
     // Extract files
     s.push_str("    DetailPrint \"Extracting files...\"\n");
-    s.push_str("    File \"${SRCDIR}\\rsh.exe\"\n");
+    s.push_str("    File \"${SRCDIR}\\mrsh.exe\"\n");
     s.push_str("    File \"${SRCDIR}\\authorized_keys\"\n");
     s.push_str("    File \"${SRCDIR}\\install.bat\"\n");
     if has_startup {
@@ -352,19 +353,19 @@ fn generate_nsi_script(version: &str, port: u16, has_startup: bool, has_config: 
 
     // Install service
     s.push_str("    DetailPrint \"Installing mrsh service...\"\n");
-    s.push_str("    nsExec::ExecToStack '\"$INSTDIR\\rsh.exe\" --install'\n");
+    s.push_str("    nsExec::ExecToStack '\"$INSTDIR\\mrsh.exe\" --install'\n");
     s.push_str("    Pop $0\n");
     s.push_str("    StrCmp $0 \"0\" +2 0\n");
     s.push_str("    DetailPrint \"Warning: service install returned $0\"\n\n");
 
     // Start service
     s.push_str("    DetailPrint \"Starting mrsh service...\"\n");
-    s.push_str("    nsExec::ExecToStack 'net start rsh'\n");
+    s.push_str("    nsExec::ExecToStack 'net start mrsh'\n");
     s.push_str("    Pop $0\n\n");
 
     // Firewall rule
     s.push_str("    DetailPrint \"Adding firewall rule...\"\n");
-    s.push_str("    nsExec::ExecToStack 'netsh advfirewall firewall add rule name=\"rsh\" dir=in action=allow program=\"$INSTDIR\\rsh.exe\" enable=yes'\n");
+    s.push_str("    nsExec::ExecToStack 'netsh advfirewall firewall add rule name=\"mrsh\" dir=in action=allow program=\"$INSTDIR\\mrsh.exe\" enable=yes'\n");
     s.push_str("    Pop $0\n\n");
 
     // Done
@@ -394,10 +395,28 @@ fn find_makensis() -> Result<PathBuf> {
         }
     }
 
+    // Check PATH using `where` on Windows, `which` on Unix
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(output) = std::process::Command::new("where")
+            .arg("makensis.exe")
+            .output()
+        {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().lines().next().unwrap_or("").to_string();
+                if !path.is_empty() {
+                    return Ok(PathBuf::from(path));
+                }
+            }
+        }
+    }
+
     // Common locations
     for candidate in [
         "/usr/bin/makensis",
         "/usr/local/bin/makensis",
+        r"C:\Program Files (x86)\NSIS\makensis.exe",
+        r"C:\Program Files\NSIS\makensis.exe",
     ] {
         let p = PathBuf::from(candidate);
         if p.exists() {
@@ -408,6 +427,7 @@ fn find_makensis() -> Result<PathBuf> {
     bail!(
         "makensis not found. Install NSIS:\n\
          \x20 Ubuntu/Debian: sudo apt install nsis\n\
+         \x20 Windows: winget install NSIS.NSIS\n\
          \x20 macOS: brew install makensis"
     )
 }
@@ -421,7 +441,7 @@ fn find_binary(explicit: &Option<PathBuf>, is_windows: bool) -> Result<PathBuf> 
         bail!("specified binary not found: {}", p.display());
     }
 
-    let binary_name = if is_windows { "rsh.exe" } else { "rsh" };
+    let binary_name = if is_windows { "mrsh.exe" } else { "mrsh" };
     let deploy_name = format!("deploy/{binary_name}");
 
     // Check deploy/ relative to CWD
@@ -459,10 +479,12 @@ fn build_authorized_keys(extra_keys: &[String]) -> Result<String> {
 
     let home = dirs::home_dir().context("cannot determine home directory")?;
     let ssh_dir = home.join(".ssh");
-    let rsh_dir = home.join(".rsh");
+    let mrsh_dir = home.join(".mrsh");
+    let rsh_dir = home.join(".rsh"); // legacy compat
 
     let candidates = [
         ssh_dir.join("id_ed25519.pub"),
+        mrsh_dir.join("id_ed25519.pub"),
         rsh_dir.join("id_ed25519.pub"),
         ssh_dir.join("id_rsa.pub"),
     ];
@@ -498,7 +520,10 @@ fn build_authorized_keys(extra_keys: &[String]) -> Result<String> {
 /// Path to the local groups registry file (~/.mrsh/groups.json).
 fn groups_file() -> Result<PathBuf> {
     let home = dirs::home_dir().context("cannot determine home directory")?;
-    Ok(home.join(".rsh").join("groups.json"))
+    let mrsh_path = home.join(".mrsh").join("groups.json");
+    let rsh_path = home.join(".rsh").join("groups.json");
+    // Prefer new location, fall back to legacy
+    Ok(if mrsh_path.exists() { mrsh_path } else { rsh_path })
 }
 
 fn load_groups() -> Result<std::collections::HashMap<String, String>> {
@@ -577,7 +602,7 @@ fn generate_windows_script(port: u16, nas_auth: &Option<String>) -> String {
     ));
 
     script.push_str(&format!(
-        "copy /Y \"%~dp0rsh.exe\" \"{}\\rsh.exe\"\r\n",
+        "copy /Y \"%~dp0mrsh.exe\" \"{}\\mrsh.exe\"\r\n",
         data_dir
     ));
     script.push_str(&format!(
@@ -601,7 +626,7 @@ fn generate_windows_script(port: u16, nas_auth: &Option<String>) -> String {
     script.push_str("echo Files copied.\r\n\r\n");
 
     script.push_str(&format!(
-        "\"{}\\rsh.exe\" --install\r\n",
+        "\"{}\\mrsh.exe\" --install\r\n",
         data_dir
     ));
     script.push_str("if %errorlevel% neq 0 (\r\n");
@@ -610,12 +635,12 @@ fn generate_windows_script(port: u16, nas_auth: &Option<String>) -> String {
     script.push_str("    exit /b 1\r\n");
     script.push_str(")\r\n\r\n");
 
-    script.push_str("net start rsh\r\n");
+    script.push_str("net start mrsh\r\n");
     script.push_str("echo.\r\n\r\n");
 
     script.push_str(&format!(
-        "netsh advfirewall firewall add rule name=\"rsh\" dir=in action=allow \
-         program=\"{}\\rsh.exe\" enable=yes >nul 2>&1\r\n",
+        "netsh advfirewall firewall add rule name=\"mrsh\" dir=in action=allow \
+         program=\"{}\\mrsh.exe\" enable=yes >nul 2>&1\r\n",
         data_dir
     ));
     script.push_str("echo Firewall rule added.\r\n\r\n");
@@ -650,10 +675,11 @@ fn generate_linux_script(port: u16) -> String {
     script.push_str("fi\n\n");
 
     let bin_dir = "/usr/local/bin";
-    let conf_dir = "/etc/rsh";
+    let conf_dir = "/etc/mrsh";
 
-    script.push_str(&format!("install -m 755 \"$(dirname \"$0\")/rsh\" \"{}/rsh\"\n", bin_dir));
-    script.push_str(&format!("echo \"Binary installed: {}/rsh\"\n\n", bin_dir));
+    script.push_str(&format!("install -m 755 \"$(dirname \"$0\")/mrsh\" \"{}/mrsh\"\n", bin_dir));
+    script.push_str(&format!("ln -sf \"{0}/mrsh\" \"{0}/rsh\" 2>/dev/null\n", bin_dir)); // compat symlink
+    script.push_str(&format!("echo \"Binary installed: {}/mrsh\"\n\n", bin_dir));
 
     script.push_str(&format!("mkdir -p \"{}\"\n", conf_dir));
     script.push_str(&format!(
@@ -670,16 +696,16 @@ fn generate_linux_script(port: u16) -> String {
 
     script.push_str(&format!("echo \"Config directory: {}\"\n\n", conf_dir));
 
-    script.push_str(&format!("{}/rsh --install\n", bin_dir));
+    script.push_str(&format!("{}/mrsh --install\n", bin_dir));
     script.push_str("echo \"Systemd service installed.\"\n\n");
 
     script.push_str("systemctl daemon-reload\n");
-    script.push_str("systemctl enable --now rsh\n");
+    script.push_str("systemctl enable --now mrsh\n");
     script.push_str("echo \"Service started.\"\n\n");
 
     script.push_str("echo\n");
     script.push_str("echo \"=== Installation complete ===\"\n");
-    script.push_str(&format!("echo \"rsh listening on port {}\"\n", port));
+    script.push_str(&format!("echo \"mrsh listening on port {}\"\n", port));
     script.push_str("echo \"Connect with: mrsh -h <this-machine-ip> ping\"\n");
 
     script
@@ -711,9 +737,9 @@ mod tests {
     fn windows_script_contains_essentials() {
         let script = generate_windows_script(8822, &None);
         assert!(script.contains("net session"));
-        assert!(script.contains("rsh.exe"));
+        assert!(script.contains("mrsh.exe"));
         assert!(script.contains("--install"));
-        assert!(script.contains("net start"));
+        assert!(script.contains("net start mrsh"));
         assert!(script.contains("netsh advfirewall"));
         assert!(script.contains("ProgramData"));
     }
@@ -732,7 +758,7 @@ mod tests {
         assert!(script.contains("install -m 755"));
         assert!(script.contains("--install"));
         assert!(script.contains("systemctl enable"));
-        assert!(script.contains("/etc/rsh"));
+        assert!(script.contains("/etc/mrsh"));
     }
 
     #[test]
@@ -747,7 +773,7 @@ mod tests {
     fn generate_linux_sfx() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("test-install.sh");
-        let fake_bin = dir.path().join("rsh");
+        let fake_bin = dir.path().join("mrsh");
         std::fs::write(&fake_bin, b"fake-binary-content").unwrap();
 
         let opts = InstallPackOptions {
@@ -777,13 +803,13 @@ mod tests {
     fn nsi_script_has_required_sections() {
         let script = generate_nsi_script("5.15.0", 8822, false, false);
         assert!(script.contains("MUI2.nsh"));
-        assert!(script.contains("rsh 5.15.0"));
+        assert!(script.contains("mrsh 5.15.0"));
         assert!(script.contains("RequestExecutionLevel admin"));
         assert!(script.contains("ProgramData\\mrsh"));
-        assert!(script.contains("rsh.exe"));
+        assert!(script.contains("mrsh.exe"));
         assert!(script.contains("authorized_keys"));
         assert!(script.contains("--install"));
-        assert!(script.contains("net start rsh"));
+        assert!(script.contains("net start mrsh"));
         assert!(script.contains("netsh advfirewall"));
         assert!(script.contains("8822"));
     }
@@ -814,7 +840,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("test-install.exe");
-        let fake_bin = dir.path().join("rsh.exe");
+        let fake_bin = dir.path().join("mrsh.exe");
         std::fs::write(&fake_bin, b"fake-windows-binary").unwrap();
 
         let opts = InstallPackOptions {
