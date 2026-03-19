@@ -92,9 +92,11 @@ fn register_tray_logon_task(exe_path: &str) -> anyhow::Result<()> {
 
     // Create task with ONLOGON trigger, running as the interactive user group.
     // /F = force overwrite existing | /RL LIMITED = run without admin
-    // Must use "cmd /c" wrapper: direct exe launch from Task Scheduler crashes
-    // Rust runtime on Windows 10 IoT LTSC (see docs/solved/2026-03-11-001).
-    let tray_cmd = format!("cmd /c \"{}\" --tray", exe_path);
+    // Direct exe launch: the binary is GUI subsystem (no console window).
+    // On Win10 IoT LTSC, direct launch from Task Scheduler may crash Rust
+    // runtime (docs/solved/2026-03-11-001) — but cmd /c creates a visible
+    // console window. Use direct launch; LTSC machines can adjust manually.
+    let tray_cmd = format!("\"{}\" --tray", exe_path);
     let output = Command::new("schtasks")
         .args([
             "/create",
