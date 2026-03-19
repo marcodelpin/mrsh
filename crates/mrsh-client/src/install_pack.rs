@@ -398,9 +398,12 @@ fn generate_nsi_script(version: &str, port: u16, has_startup: bool, has_config: 
     s.push_str("    Pop $0\n");
     s.push_str("    DetailPrint \"Legacy directory cleaned up.\"\n\n");
 
-    // Launch tray in user session (Exec runs as the interactive user, not SYSTEM)
+    // Launch tray in user session via scheduled task (ONLOGON task registered by --install).
+    // Cannot use Exec — NSIS runs elevated (SYSTEM), Exec inherits that session.
+    // schtasks /run launches the ONLOGON task in the interactive user session.
     s.push_str("    DetailPrint \"Starting tray icon...\"\n");
-    s.push_str("    Exec '\"$INSTDIR\\mrsh.exe\" --tray'\n\n");
+    s.push_str("    nsExec::ExecToStack 'schtasks /run /tn mrsh-tray'\n");
+    s.push_str("    Pop $0\n\n");
 
     // Done
     s.push_str(&format!(
