@@ -332,16 +332,23 @@ fn generate_nsi_script(version: &str, port: u16, has_startup: bool, has_config: 
     s.push_str("Section \"Install\"\n");
     s.push_str("    SetOutPath $INSTDIR\n\n");
 
-    // Stop existing services (ignore errors)
+    // Stop existing services and kill all processes (ignore errors)
     s.push_str("    DetailPrint \"Stopping existing services...\"\n");
     s.push_str("    nsExec::ExecToStack 'net stop mrsh'\n");
     s.push_str("    Pop $0\n");
-    s.push_str("    nsExec::ExecToStack 'net stop rsh'\n"); // legacy service name
+    s.push_str("    nsExec::ExecToStack 'net stop rsh'\n");
+    s.push_str("    Pop $0\n");
+    s.push_str("    nsExec::ExecToStack 'sc delete rsh'\n"); // delete legacy service registration
+    s.push_str("    Pop $0\n");
+    s.push_str("    nsExec::ExecToStack 'sc delete mrsh'\n"); // delete to re-register with correct binary path
     s.push_str("    Pop $0\n");
     s.push_str("    nsExec::ExecToStack 'taskkill /F /IM mrsh.exe'\n");
     s.push_str("    Pop $0\n");
     s.push_str("    nsExec::ExecToStack 'taskkill /F /IM rsh.exe'\n");
-    s.push_str("    Pop $0\n\n");
+    s.push_str("    Pop $0\n");
+    // Remove old rsh.exe from mrsh dir (legacy rename artifact)
+    s.push_str("    Delete \"$INSTDIR\\rsh.exe\"\n");
+    s.push_str("    Delete \"$INSTDIR\\rsh.exe.bak\"\n\n");
 
     // Extract files
     s.push_str("    DetailPrint \"Extracting files...\"\n");
@@ -619,10 +626,26 @@ fn generate_windows_script(port: u16, nas_auth: &Option<String>) -> String {
     script.push_str(")\r\n\r\n");
 
     let data_dir = r"C:\ProgramData\mrsh";
+    // Stop everything and clean up before installing
+    script.push_str("echo Stopping all services...\r\n");
+    script.push_str("net stop mrsh >nul 2>&1\r\n");
+    script.push_str("net stop rsh >nul 2>&1\r\n");
+    script.push_str("sc delete rsh >nul 2>&1\r\n");
+    script.push_str("sc delete mrsh >nul 2>&1\r\n");
+    script.push_str("taskkill /F /IM mrsh.exe >nul 2>&1\r\n");
+    script.push_str("taskkill /F /IM rsh.exe >nul 2>&1\r\n");
+    script.push_str("timeout /t 3 /nobreak >nul\r\n\r\n");
+
     script.push_str(&format!(
         "if not exist \"{}\" mkdir \"{}\"\r\n",
         data_dir, data_dir
     ));
+
+    // Remove old rsh.exe from mrsh dir (legacy rename artifact)
+    script.push_str(&format!(
+        "del /q \"{}\\rsh.exe\" >nul 2>&1\r\n", data_dir));
+    script.push_str(&format!(
+        "del /q \"{}\\rsh.exe.bak\" >nul 2>&1\r\n\r\n", data_dir));
 
     script.push_str(&format!(
         "copy /Y \"%~dp0mrsh.exe\" \"{}\\mrsh.exe\"\r\n",
@@ -657,11 +680,6 @@ fn generate_windows_script(port: u16, nas_auth: &Option<String>) -> String {
     script.push_str("    pause\r\n");
     script.push_str("    exit /b 1\r\n");
     script.push_str(")\r\n\r\n");
-
-    script.push_str("echo Stopping legacy services...\r\n");
-    script.push_str("net stop rsh >nul 2>&1\r\n");
-    script.push_str("taskkill /F /IM rsh.exe >nul 2>&1\r\n");
-    script.push_str("taskkill /F /IM mrsh.exe >nul 2>&1\r\n\r\n");
 
     script.push_str("net start mrsh\r\n");
     script.push_str("echo.\r\n\r\n");
