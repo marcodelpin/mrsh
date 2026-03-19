@@ -118,6 +118,13 @@ fn register_tray_logon_task(exe_path: &str) -> anyhow::Result<()> {
     }
 
     info!("tray logon task registered: {}", TRAY_TASK_NAME);
+
+    // Also run the tray task immediately — user is likely already logged in
+    // during --install. ONLOGON only fires on NEXT login.
+    let _ = Command::new("schtasks")
+        .args(["/run", "/tn", TRAY_TASK_NAME])
+        .output();
+
     Ok(())
 }
 
