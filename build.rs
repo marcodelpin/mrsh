@@ -7,10 +7,14 @@ fn main() {
         let icon_path = std::path::Path::new(&manifest_dir).join("icon.ico");
 
         let mut res = winres::WindowsResource::new();
-        // Cross-compilation: explicit paths to mingw toolchain
-        res.set_toolkit_path("/usr/bin");
-        res.set_ar_path("/usr/bin/x86_64-w64-mingw32-ar");
-        res.set_windres_path("/usr/bin/x86_64-w64-mingw32-windres");
+        // Cross-compilation from Linux: explicit paths to mingw toolchain.
+        // On native Windows (MSVC), winres auto-detects rc.exe — skip mingw paths.
+        let host = std::env::var("HOST").unwrap_or_default();
+        if !host.contains("windows") {
+            res.set_toolkit_path("/usr/bin");
+            res.set_ar_path("/usr/bin/x86_64-w64-mingw32-ar");
+            res.set_windres_path("/usr/bin/x86_64-w64-mingw32-windres");
+        }
         res.set_manifest(
             r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">

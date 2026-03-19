@@ -257,9 +257,23 @@ mod win32_tray {
                 None,
             )?;
 
-            // Create tray icon
-            let hicon = LoadIconW(None, IDI_APPLICATION)?;
-            let tooltip = str_to_wide_buf::<128>(&format!("rsh v{} (port {})", env!("CARGO_PKG_VERSION"), port));
+            // Create tray icon — load embedded icon from exe resource (winres),
+            // fall back to generic application icon if not embedded.
+            let hicon = {
+                use windows::Win32::UI::WindowsAndMessaging::{LoadImageW, IMAGE_ICON, LR_DEFAULTSIZE};
+                use windows::Win32::Foundation::HINSTANCE;
+                let exe_icon = LoadImageW(
+                    Some(HINSTANCE(hinstance.0)),
+                    windows::core::w!("#1"), // resource ID 1 = main icon from winres
+                    IMAGE_ICON,
+                    0, 0, LR_DEFAULTSIZE,
+                );
+                match exe_icon {
+                    Ok(h) if !h.is_invalid() => HICON(h.0),
+                    _ => LoadIconW(None, IDI_APPLICATION)?,
+                }
+            };
+            let tooltip = str_to_wide_buf::<128>(&format!("mrsh v{} (port {})", env!("CARGO_PKG_VERSION"), port));
 
             let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
             nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
