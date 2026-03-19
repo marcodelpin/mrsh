@@ -8,7 +8,7 @@ use tracing::info;
 pub const SERVICE_NAME: &str = "mrsh";
 
 /// Display name in Windows Services console.
-pub const SERVICE_DISPLAY_NAME: &str = "mrsh — Remote Shell";
+pub const SERVICE_DISPLAY_NAME: &str = "mrsh - Remote Shell";
 
 /// Install mrsh as a Windows service.
 #[cfg(target_os = "windows")]
@@ -46,7 +46,7 @@ pub fn install_service(exe_path: &str) -> anyhow::Result<()> {
                 .args([
                     "config", SERVICE_NAME,
                     &format!("binPath= \"{}\" --service", exe_path),
-                    &format!("DisplayName= {}", SERVICE_DISPLAY_NAME),
+                    &format!("DisplayName= \"{}\"", SERVICE_DISPLAY_NAME),
                 ])
                 .output();
         }
