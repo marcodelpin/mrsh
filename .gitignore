@@ -107,6 +107,7 @@ knowledge_graph/
 # RUST
 # ============================================================================
 target/
+target2/
 
 # ============================================================================
 # PROJECT-SPECIFIC
@@ -117,6 +118,8 @@ deploy/
 # Generated install packs (released via releases/ with git-lfs)
 rsh-*-windows-install.exe
 rsh-*-linux-install.sh
+mrsh-*-windows-install.exe
+mrsh-*-linux-install.sh
 
 # Dolt database files
 .dolt/
