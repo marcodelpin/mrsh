@@ -91,14 +91,17 @@ fn register_tray_logon_task(exe_path: &str) -> anyhow::Result<()> {
     use std::process::Command;
 
     // Create task with ONLOGON trigger, running as the interactive user group.
-    // /F = force overwrite existing | /RL HIGHEST = run with admin privileges
+    // /F = force overwrite existing | /RL LIMITED = run without admin
+    // Must use "cmd /c" wrapper: direct exe launch from Task Scheduler crashes
+    // Rust runtime on Windows 10 IoT LTSC (see docs/solved/2026-03-11-001).
+    let tray_cmd = format!("cmd /c \"{}\" --tray", exe_path);
     let output = Command::new("schtasks")
         .args([
             "/create",
             "/tn",
             TRAY_TASK_NAME,
             "/tr",
-            exe_path,
+            &tray_cmd,
             "/sc",
             "ONLOGON",
             "/rl",
