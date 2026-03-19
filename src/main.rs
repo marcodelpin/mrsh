@@ -198,29 +198,56 @@ fn main() -> Result<()> {
                 // After attach/alloc, reopen std handles so Rust's stdin/stdout
                 // point to the (re)attached console. Without this, GUI subsystem
                 // binary has null stdout → print! output lost (exec from PowerShell).
+                //
+                // IMPORTANT: only overwrite handles that are NULL. When launched
+                // with redirected output (WSL interop, PowerShell pipe, cmd >file),
+                // the parent sets valid pipe handles — overwriting them with CONOUT$
+                // silently discards all piped output.
                 {
                     use windows::Win32::Storage::FileSystem::{
                         CreateFileW, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
                         FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
                     };
                     use windows::Win32::System::Console::{
-                        SetStdHandle, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
-                        STD_ERROR_HANDLE,
+                        GetStdHandle, SetStdHandle, STD_INPUT_HANDLE,
+                        STD_OUTPUT_HANDLE, STD_ERROR_HANDLE,
                     };
                     use windows::core::w;
-                    // Reopen CONIN$/CONOUT$ to get fresh handles to the console
-                    if let Ok(h) = CreateFileW(
-                        w!("CONIN$"), FILE_GENERIC_READ.0,
-                        FILE_SHARE_READ, None, OPEN_EXISTING, Default::default(), None,
-                    ) {
-                        let _ = SetStdHandle(STD_INPUT_HANDLE, h);
+
+                    // Helper: check if a std handle is already valid (non-null,
+                    // non-INVALID_HANDLE_VALUE). If so, it was set by the parent
+                    // (pipe/redirect) and must NOT be overwritten.
+                    let handle_valid = |which| -> bool {
+                        matches!(GetStdHandle(which), Ok(h) if !h.is_invalid() && h.0 as usize != 0)
+                    };
+
+                    let stdin_ok = handle_valid(STD_INPUT_HANDLE);
+                    let stdout_ok = handle_valid(STD_OUTPUT_HANDLE);
+                    let stderr_ok = handle_valid(STD_ERROR_HANDLE);
+
+                    if !stdin_ok {
+                        if let Ok(h) = CreateFileW(
+                            w!("CONIN$"), FILE_GENERIC_READ.0,
+                            FILE_SHARE_READ, None, OPEN_EXISTING, Default::default(), None,
+                        ) {
+                            let _ = SetStdHandle(STD_INPUT_HANDLE, h);
+                        }
                     }
-                    if let Ok(h) = CreateFileW(
-                        w!("CONOUT$"), FILE_GENERIC_WRITE.0,
-                        FILE_SHARE_WRITE, None, OPEN_EXISTING, Default::default(), None,
-                    ) {
-                        let _ = SetStdHandle(STD_OUTPUT_HANDLE, h);
-                        let _ = SetStdHandle(STD_ERROR_HANDLE, h);
+                    if !stdout_ok {
+                        if let Ok(h) = CreateFileW(
+                            w!("CONOUT$"), FILE_GENERIC_WRITE.0,
+                            FILE_SHARE_WRITE, None, OPEN_EXISTING, Default::default(), None,
+                        ) {
+                            let _ = SetStdHandle(STD_OUTPUT_HANDLE, h);
+                        }
+                    }
+                    if !stderr_ok {
+                        if let Ok(h) = CreateFileW(
+                            w!("CONOUT$"), FILE_GENERIC_WRITE.0,
+                            FILE_SHARE_WRITE, None, OPEN_EXISTING, Default::default(), None,
+                        ) {
+                            let _ = SetStdHandle(STD_ERROR_HANDLE, h);
+                        }
                     }
                 }
             }
