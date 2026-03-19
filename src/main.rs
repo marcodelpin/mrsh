@@ -498,7 +498,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                 bail!("wake requires a MAC address (aa:bb:cc:dd:ee:ff)");
             }
             mrsh_client::shell::send_wol(&args[1])?;
-            eprintln!("WoL packet sent to {}", args[1]);
+            println!("WoL packet sent to {}", args[1]);
             return Ok(());
         }
         "recording" => {
@@ -532,7 +532,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                         + ".cast";
                 }
                 mrsh_client::recording::export_asciicast(&log_file, &out_file, width, height)?;
-                eprintln!("Exported to {}", out_file);
+                println!("Exported to {}", out_file);
                 return Ok(());
             }
             // "list" with no -h → fall through to client section
@@ -740,7 +740,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                 }
                 let data = std::fs::read(&args[1])?;
                 let written = quic.push(&args[2], &data).await?;
-                eprintln!("pushed {} bytes to {}", written, args[2]);
+                println!("pushed {} bytes to {}", written, args[2]);
             }
             "pull" | "cat" => {
                 if args.len() < 2 {
@@ -751,7 +751,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                     std::io::Write::write_all(&mut std::io::stdout(), &data)?;
                 } else {
                     std::fs::write(&args[2], &data)?;
-                    eprintln!("pulled {} bytes to {}", data.len(), args[2]);
+                    println!("pulled {} bytes to {}", data.len(), args[2]);
                 }
             }
             "ls" => {
@@ -860,7 +860,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                 .context("decode screenshot base64")?;
                 let out_path = format!("screenshot_{}.jpg", display);
                 std::fs::write(&out_path, &data)?;
-                eprintln!("saved {} ({} bytes)", out_path, data.len());
+                println!("saved {} ({} bytes)", out_path, data.len());
             }
             // ── Clipboard ────────────────────────────────────────────
             "clip" | "clipboard" => {
@@ -877,7 +877,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                         let text = args[2..].join(" ");
                         let escaped = text.replace('\'', "''");
                         quic.exec(&format!("Set-Clipboard '{}'", escaped)).await?;
-                        eprintln!("clipboard set");
+                        println!("clipboard set");
                     }
                     other => bail!("unknown clip action: {} (use get|set)", other),
                 }
@@ -908,7 +908,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                 }
                 let content = args[2..].join(" ");
                 let written = quic.push(&args[1], content.as_bytes()).await?;
-                eprintln!("wrote {} bytes to {}", written, args[1]);
+                println!("wrote {} bytes to {}", written, args[1]);
             }
             // ── Self-update ──────────────────────────────────────────
             "self-update" => {
@@ -927,7 +927,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                      'OK: restart service to apply'",
                     escaped
                 )).await?;
-                eprintln!("{}", output);
+                println!("{}", output);
             }
             // ── GUI automation ───────────────────────────────────────
             "input" | "mouse" | "key" | "window" => {
@@ -953,7 +953,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                         return Ok(());
                     }
                 }
-                eprintln!("Rebooting {}:{}...", resolved_host, resolved_port);
+                println!("Rebooting {}:{}...", resolved_host, resolved_port);
                 quic.exec("Restart-Computer -Force").await.ok();
             }
             "shutdown" => {
@@ -967,9 +967,9 @@ async fn async_main(cli: Cli) -> Result<()> {
                         return Ok(());
                     }
                 }
-                eprintln!("Shutting down {}:{}...", resolved_host, resolved_port);
+                println!("Shutting down {}:{}...", resolved_host, resolved_port);
                 quic.exec("Stop-Computer -Force").await.ok();
-                eprintln!("Shutdown command sent.");
+                println!("Shutdown command sent.");
             }
             "sleep" => {
                 let force = args.get(1).map(|s| s == "-f" || s == "--force").unwrap_or(false);
@@ -982,16 +982,16 @@ async fn async_main(cli: Cli) -> Result<()> {
                         return Ok(());
                     }
                 }
-                eprintln!("Putting {}:{} to sleep...", resolved_host, resolved_port);
+                println!("Putting {}:{} to sleep...", resolved_host, resolved_port);
                 quic.exec(
                     "Add-Type -Assembly System.Windows.Forms; [System.Windows.Forms.Application]::SetSuspendState([System.Windows.Forms.PowerState]::Suspend, $true, $false)"
                 ).await.ok();
-                eprintln!("Sleep command sent.");
+                println!("Sleep command sent.");
             }
             "lock" => {
-                eprintln!("Locking workstation on {}:{}...", resolved_host, resolved_port);
+                println!("Locking workstation on {}:{}...", resolved_host, resolved_port);
                 quic.exec("rundll32.exe user32.dll,LockWorkStation").await?;
-                eprintln!("Workstation locked.");
+                println!("Workstation locked.");
             }
             // ── Status (multi-ping with RTT stats) ───────────────────
             "status" => {
@@ -1243,7 +1243,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                         &mut client, local_path, &args[2],
                     ).await?;
                     if deleted > 0 {
-                        eprintln!("--delete: removed {} remote files", deleted);
+                        println!("--delete: removed {} remote files", deleted);
                     }
                 }
             } else {
@@ -1252,7 +1252,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                 } else {
                     let data = std::fs::read(local_path)?;
                     let result = mrsh_client::sync::push(&mut client, &data, &args[2]).await?;
-                    eprintln!(
+                    println!(
                         "pushed {} bytes to {} (delta: {})",
                         result.bytes_sent, result.path, result.delta
                     );
@@ -1277,7 +1277,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             if is_dir {
                 let local_path = std::path::Path::new(&args[2]);
                 let result = mrsh_client::sync::pull_dir(&mut client, &args[1], local_path, &xfer_opts).await?;
-                eprintln!(
+                println!(
                     "pulled directory: {}/{} files, {} bytes",
                     result.files_transferred, result.files_total, result.bytes_total
                 );
@@ -1289,7 +1289,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                     let result =
                         mrsh_client::sync::pull(&mut client, local_data.as_deref(), &args[1]).await?;
                     std::fs::write(&args[2], &result.data)?;
-                    eprintln!(
+                    println!(
                         "pulled {} bytes (delta: {})",
                         result.data.len(),
                         result.delta
@@ -1305,7 +1305,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                 mrsh_client::commands::screenshot(&mut client, display_idx, quality, scale).await?;
             let out_path = format!("screenshot_{}.jpg", display_idx);
             std::fs::write(&out_path, &data)?;
-            eprintln!("saved {} ({} bytes)", out_path, data.len());
+            println!("saved {} ({} bytes)", out_path, data.len());
         }
         "sessions" => {
             let action = args.get(1).map(|s| s.as_str()).unwrap_or("list");
@@ -1319,7 +1319,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                         bail!("sessions kill requires <session-id>");
                     }
                     mrsh_client::commands::session_kill(&mut client, &args[2]).await?;
-                    eprintln!("session killed");
+                    println!("session killed");
                 }
                 other => bail!("unknown sessions action: {}", other),
             }
@@ -1365,7 +1365,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                             if let Err(e) = std::fs::write(local_path, &pr.data) {
                                 eprintln!("write error: {}", e);
                             } else {
-                                eprintln!("saved {} ({} bytes)", local_path, pr.data.len());
+                                println!("saved {} ({} bytes)", local_path, pr.data.len());
                             }
                         }
                         Err(e) => eprintln!("pull error: {}", e),
@@ -1404,14 +1404,14 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
             let content = args[2..].join(" ");
             mrsh_client::commands::write_file(&mut client, &args[1], content.as_bytes()).await?;
-            eprintln!("wrote {} bytes to {}", content.len(), args[1]);
+            println!("wrote {} bytes to {}", content.len(), args[1]);
         }
         "self-update" => {
             if args.len() < 2 {
                 bail!("self-update requires <remote-binary-path>");
             }
             let result = mrsh_client::commands::self_update(&mut client, &args[1]).await?;
-            eprintln!("{}", result);
+            println!("{}", result);
         }
         "input" => {
             // mrsh -h host input mouse pos
@@ -1525,7 +1525,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                     return Ok(());
                 }
             }
-            eprintln!("Rebooting {}:{}...", resolved_host, resolved_port);
+            println!("Rebooting {}:{}...", resolved_host, resolved_port);
             mrsh_client::commands::exec(&mut client, "Restart-Computer -Force", &[])
                 .await
                 .ok();
@@ -1544,11 +1544,11 @@ async fn async_main(cli: Cli) -> Result<()> {
                     return Ok(());
                 }
             }
-            eprintln!("Shutting down {}:{}...", resolved_host, resolved_port);
+            println!("Shutting down {}:{}...", resolved_host, resolved_port);
             mrsh_client::commands::exec(&mut client, "Stop-Computer -Force", &[])
                 .await
                 .ok();
-            eprintln!("Shutdown command sent.");
+            println!("Shutdown command sent.");
         }
         "sleep" => {
             let force = args
@@ -1564,13 +1564,13 @@ async fn async_main(cli: Cli) -> Result<()> {
                     return Ok(());
                 }
             }
-            eprintln!("Putting {}:{} to sleep...", resolved_host, resolved_port);
+            println!("Putting {}:{} to sleep...", resolved_host, resolved_port);
             mrsh_client::commands::exec(
                 &mut client,
                 "Add-Type -Assembly System.Windows.Forms; [System.Windows.Forms.Application]::SetSuspendState([System.Windows.Forms.PowerState]::Suspend, $true, $false)",
                 &[],
             ).await.ok();
-            eprintln!("Sleep command sent.");
+            println!("Sleep command sent.");
         }
         "lock" => {
             eprintln!(
@@ -1579,7 +1579,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             );
             mrsh_client::commands::exec(&mut client, "rundll32.exe user32.dll,LockWorkStation", &[])
                 .await?;
-            eprintln!("Workstation locked.");
+            println!("Workstation locked.");
         }
         "mouse" | "key" | "window" => {
             // GUI automation: mrsh -h host mouse move 500 300
