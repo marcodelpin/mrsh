@@ -260,13 +260,17 @@ mod win32_tray {
             // Create tray icon — load embedded icon from exe resource (winres),
             // fall back to generic application icon if not embedded.
             let hicon = {
-                use windows::Win32::UI::WindowsAndMessaging::{LoadImageW, IMAGE_ICON, LR_DEFAULTSIZE};
+                use windows::Win32::UI::WindowsAndMessaging::LoadImageW;
                 use windows::Win32::Foundation::HINSTANCE;
+                // winres embeds icon as MAKEINTRESOURCE(1) — integer ID, not string.
+                // PCWSTR from a raw integer: low word = resource ID, high word = 0.
+                let res_id = windows::core::PCWSTR(1 as *const u16);
                 let exe_icon = LoadImageW(
                     Some(HINSTANCE(hinstance.0)),
-                    windows::core::w!("#1"), // resource ID 1 = main icon from winres
-                    IMAGE_ICON,
-                    0, 0, LR_DEFAULTSIZE,
+                    res_id,
+                    windows::Win32::UI::WindowsAndMessaging::IMAGE_ICON,
+                    0, 0,
+                    windows::Win32::UI::WindowsAndMessaging::LR_DEFAULTSIZE,
                 );
                 match exe_icon {
                     Ok(h) if !h.is_invalid() => HICON(h.0),
