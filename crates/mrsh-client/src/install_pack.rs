@@ -398,6 +398,10 @@ fn generate_nsi_script(version: &str, port: u16, has_startup: bool, has_config: 
     s.push_str("    Pop $0\n");
     s.push_str("    DetailPrint \"Legacy directory cleaned up.\"\n\n");
 
+    // Launch tray in user session (Exec runs as the interactive user, not SYSTEM)
+    s.push_str("    DetailPrint \"Starting tray icon...\"\n");
+    s.push_str("    Exec '\"$INSTDIR\\mrsh.exe\" --tray'\n\n");
+
     // Done
     s.push_str(&format!(
         "    DetailPrint \"Installation complete. mrsh listening on port {}.\"\n",
@@ -706,6 +710,10 @@ fn generate_windows_script(port: u16, nas_auth: &Option<String>) -> String {
     script.push_str("    rmdir /s /q C:\\ProgramData\\remote-shell\r\n");
     script.push_str("    echo Legacy directory removed.\r\n");
     script.push_str(")\r\n\r\n");
+
+    // Launch tray in user session (start /b = background, no new window)
+    script.push_str(&format!(
+        "start \"\" \"{}\\mrsh.exe\" --tray\r\n\r\n", data_dir));
 
     script.push_str("echo === Installation complete ===\r\n");
     script.push_str(&format!(
