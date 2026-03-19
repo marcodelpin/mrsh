@@ -35,7 +35,23 @@ pub fn install_service(exe_path: &str) -> anyhow::Result<()> {
         account_password: None,
     };
 
-    let _service = manager.create_service(&service_info, ServiceAccess::CHANGE_CONFIG)?;
+    // Try create; if service already exists, update its config (display name, binary path)
+    match manager.create_service(&service_info, ServiceAccess::CHANGE_CONFIG) {
+        Ok(_) => {}
+        Err(windows_service::Error::Winapi(ref e))
+            if e.raw_os_error() == Some(0x431) /* ERROR_SERVICE_EXISTS */ =>
+        {
+            info!("service already exists, updating config");
+            let _ = std::process::Command::new("sc")
+                .args([
+                    "config", SERVICE_NAME,
+                    &format!("binPath= \"{}\" --service", exe_path),
+                    &format!("DisplayName= {}", SERVICE_DISPLAY_NAME),
+                ])
+                .output();
+        }
+        Err(e) => return Err(e.into()),
+    }
 
     // Set recovery options: restart on failure
     // windows-service doesn't expose failure actions directly,
