@@ -332,10 +332,15 @@ fn generate_nsi_script(version: &str, port: u16, has_startup: bool, has_config: 
     s.push_str("Section \"Install\"\n");
     s.push_str("    SetOutPath $INSTDIR\n\n");
 
-    // Stop existing service if running (ignore errors)
-    s.push_str("    DetailPrint \"Stopping existing mrsh service (if any)...\"\n");
+    // Stop existing services (ignore errors)
+    s.push_str("    DetailPrint \"Stopping existing services...\"\n");
     s.push_str("    nsExec::ExecToStack 'net stop mrsh'\n");
+    s.push_str("    Pop $0\n");
     s.push_str("    nsExec::ExecToStack 'net stop rsh'\n"); // legacy service name
+    s.push_str("    Pop $0\n");
+    s.push_str("    nsExec::ExecToStack 'taskkill /F /IM mrsh.exe'\n");
+    s.push_str("    Pop $0\n");
+    s.push_str("    nsExec::ExecToStack 'taskkill /F /IM rsh.exe'\n");
     s.push_str("    Pop $0\n\n");
 
     // Extract files
@@ -367,6 +372,24 @@ fn generate_nsi_script(version: &str, port: u16, has_startup: bool, has_config: 
     s.push_str("    DetailPrint \"Adding firewall rule...\"\n");
     s.push_str("    nsExec::ExecToStack 'netsh advfirewall firewall add rule name=\"mrsh\" dir=in action=allow program=\"$INSTDIR\\mrsh.exe\" enable=yes'\n");
     s.push_str("    Pop $0\n\n");
+
+    // Legacy cleanup: migrate data from C:\ProgramData\remote-shell\ → mrsh\, then delete
+    s.push_str("    ; --- Legacy cleanup ---\n");
+    s.push_str("    IfFileExists \"C:\\ProgramData\\remote-shell\\*.*\" 0 +11\n");
+    s.push_str("    DetailPrint \"Migrating data from legacy remote-shell directory...\"\n");
+    s.push_str("    nsExec::ExecToStack 'xcopy /E /I /Y \"C:\\ProgramData\\remote-shell\\cache\" \"$INSTDIR\\cache\"'\n");
+    s.push_str("    Pop $0\n");
+    s.push_str("    nsExec::ExecToStack 'xcopy /E /I /Y \"C:\\ProgramData\\remote-shell\\sessions\" \"$INSTDIR\\sessions\"'\n");
+    s.push_str("    Pop $0\n");
+    s.push_str("    nsExec::ExecToStack 'cmd /c copy /y \"C:\\ProgramData\\remote-shell\\banner.txt\" \"$INSTDIR\\banner.txt\"'\n");
+    s.push_str("    Pop $0\n");
+    s.push_str("    nsExec::ExecToStack 'cmd /c copy /y \"C:\\ProgramData\\remote-shell\\screen-token\" \"$INSTDIR\\screen-token\"'\n");
+    s.push_str("    Pop $0\n");
+    s.push_str("    nsExec::ExecToStack 'sc delete rsh'\n");
+    s.push_str("    Pop $0\n");
+    s.push_str("    nsExec::ExecToStack 'cmd /c rmdir /s /q \"C:\\ProgramData\\remote-shell\"'\n");
+    s.push_str("    Pop $0\n");
+    s.push_str("    DetailPrint \"Legacy directory cleaned up.\"\n\n");
 
     // Done
     s.push_str(&format!(
@@ -635,6 +658,11 @@ fn generate_windows_script(port: u16, nas_auth: &Option<String>) -> String {
     script.push_str("    exit /b 1\r\n");
     script.push_str(")\r\n\r\n");
 
+    script.push_str("echo Stopping legacy services...\r\n");
+    script.push_str("net stop rsh >nul 2>&1\r\n");
+    script.push_str("taskkill /F /IM rsh.exe >nul 2>&1\r\n");
+    script.push_str("taskkill /F /IM mrsh.exe >nul 2>&1\r\n\r\n");
+
     script.push_str("net start mrsh\r\n");
     script.push_str("echo.\r\n\r\n");
 
@@ -644,6 +672,22 @@ fn generate_windows_script(port: u16, nas_auth: &Option<String>) -> String {
         data_dir
     ));
     script.push_str("echo Firewall rule added.\r\n\r\n");
+
+    // Legacy cleanup
+    script.push_str("if exist C:\\ProgramData\\remote-shell (\r\n");
+    script.push_str("    echo Cleaning up legacy directory...\r\n");
+    script.push_str(&format!(
+        "    xcopy /E /I /Y C:\\ProgramData\\remote-shell\\cache \"{}\\cache\" >nul 2>&1\r\n", data_dir));
+    script.push_str(&format!(
+        "    xcopy /E /I /Y C:\\ProgramData\\remote-shell\\sessions \"{}\\sessions\" >nul 2>&1\r\n", data_dir));
+    script.push_str(&format!(
+        "    copy /Y C:\\ProgramData\\remote-shell\\banner.txt \"{}\\banner.txt\" >nul 2>&1\r\n", data_dir));
+    script.push_str(&format!(
+        "    copy /Y C:\\ProgramData\\remote-shell\\screen-token \"{}\\screen-token\" >nul 2>&1\r\n", data_dir));
+    script.push_str("    sc delete rsh >nul 2>&1\r\n");
+    script.push_str("    rmdir /s /q C:\\ProgramData\\remote-shell\r\n");
+    script.push_str("    echo Legacy directory removed.\r\n");
+    script.push_str(")\r\n\r\n");
 
     script.push_str("echo === Installation complete ===\r\n");
     script.push_str(&format!(
