@@ -68,6 +68,16 @@ pub fn install_service(exe_path: &str) -> anyhow::Result<()> {
         info!("firewall rule added: {} (TCP {})", rule_name, port);
     }
 
+    // Kill any existing tray process (old version) before registering new task.
+    // Without this, the old tray keeps running and shows stale version.
+    let _ = std::process::Command::new("taskkill")
+        .args(["/F", "/IM", "mrsh.exe"])
+        .output();
+    // Also kill legacy binary name
+    let _ = std::process::Command::new("taskkill")
+        .args(["/F", "/IM", "rsh.exe"])
+        .output();
+
     // Register tray companion at user logon — ensures visible tray icon
     // whenever someone is logged in, preventing fully hidden operation.
     if let Err(e) = register_tray_logon_task(exe_path) {
