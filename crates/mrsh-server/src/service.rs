@@ -107,6 +107,47 @@ pub fn install_service(exe_path: &str) -> anyhow::Result<()> {
 #[cfg(target_os = "windows")]
 const TRAY_TASK_NAME: &str = "mrsh-tray";
 
+/// Ensure the tray task exists — called at service startup to self-heal
+/// if the task was deleted or never created (e.g. installer quoting bug).
+#[cfg(target_os = "windows")]
+pub fn ensure_tray_task(exe_path: &str) {
+    // Check if task exists
+    let check = std::process::Command::new("schtasks")
+        .args(["/query", "/tn", TRAY_TASK_NAME])
+        .output();
+    let task_exists = check.map(|o| o.status.success()).unwrap_or(false);
+
+    if !task_exists {
+        info!("tray task missing, re-registering");
+        if let Err(e) = register_tray_logon_task(exe_path) {
+            tracing::warn!("failed to register tray task: {}", e);
+        }
+        return; // register_tray_logon_task already calls /run
+    }
+
+    // Task exists — check if tray process is already running before launching another
+    let tasklist = std::process::Command::new("tasklist")
+        .args(["/fi", "imagename eq mrsh.exe", "/fo", "csv", "/nh"])
+        .output();
+    let tray_running = tasklist
+        .map(|o| {
+            let out = String::from_utf8_lossy(&o.stdout);
+            // Count mrsh.exe processes — if >1, tray is already running (1 = service only)
+            out.lines().filter(|l| l.contains("mrsh.exe")).count() > 1
+        })
+        .unwrap_or(false);
+
+    if !tray_running {
+        info!("tray task exists but tray not running, launching");
+        let _ = std::process::Command::new("schtasks")
+            .args(["/run", "/tn", TRAY_TASK_NAME])
+            .output();
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn ensure_tray_task(_exe_path: &str) {}
+
 /// Register a scheduled task that launches the mrsh tray at user logon.
 ///
 /// This provides user-visible evidence that mrsh is running: a system tray
@@ -116,37 +157,58 @@ const TRAY_TASK_NAME: &str = "mrsh-tray";
 fn register_tray_logon_task(exe_path: &str) -> anyhow::Result<()> {
     use std::process::Command;
 
-    // Create task with ONLOGON trigger, running as the interactive user group.
-    // /F = force overwrite existing | /RL LIMITED = run without admin
-    // Direct exe launch: the binary is GUI subsystem (no console window).
-    // On Win10 IoT LTSC, direct launch from Task Scheduler may crash Rust
-    // runtime (docs/solved/2026-03-11-001) — but cmd /c creates a visible
-    // console window. Use direct launch; LTSC machines can adjust manually.
-    let tray_cmd = format!("\"{}\" --tray", exe_path);
+    // Use XML import for the task — schtasks /create /sc ONLOGON from SYSTEM
+    // doesn't set GroupId correctly, causing the task to run in session 0
+    // instead of the interactive user session. XML with GroupId S-1-5-32-545
+    // (Users group) ensures the task launches in the logged-in user's session.
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>
+  <Principals><Principal id="Author"><GroupId>S-1-5-32-545</GroupId><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Hidden>true</Hidden>
+  </Settings>
+  <Actions><Exec><Command>{exe}</Command><Arguments>--tray</Arguments></Exec></Actions>
+</Task>"#,
+        exe = exe_path,
+    );
+
+    // Write XML to temp file
+    let xml_path = std::env::temp_dir().join("mrsh-tray-task.xml");
+    // Write as UTF-16 LE with BOM (required by schtasks /xml)
+    let mut utf16: Vec<u8> = vec![0xFF, 0xFE]; // BOM
+    for c in xml.encode_utf16() {
+        utf16.push(c as u8);
+        utf16.push((c >> 8) as u8);
+    }
+    std::fs::write(&xml_path, &utf16)?;
+
     let output = Command::new("schtasks")
         .args([
             "/create",
             "/tn",
             TRAY_TASK_NAME,
-            "/tr",
-            &tray_cmd,
-            "/sc",
-            "ONLOGON",
-            "/rl",
-            "LIMITED",
+            "/xml",
+            xml_path.to_str().unwrap_or(""),
             "/f",
         ])
         .output()?;
 
+    let _ = std::fs::remove_file(&xml_path);
+
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("schtasks create failed: {}", stderr.trim());
+        anyhow::bail!("schtasks xml import failed: {}", stderr.trim());
     }
 
     info!("tray logon task registered: {}", TRAY_TASK_NAME);
 
-    // Also run the tray task immediately — user is likely already logged in
-    // during --install. ONLOGON only fires on NEXT login.
+    // Run the tray task immediately — user is likely already logged in.
     let _ = Command::new("schtasks")
         .args(["/run", "/tn", TRAY_TASK_NAME])
         .output();

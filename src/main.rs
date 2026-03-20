@@ -379,6 +379,15 @@ fn main() -> Result<()> {
     {
         // Explicit --service flag: SCM launched us with this flag, go straight to dispatch.
         if cli.service {
+            // Ensure tray task exists (self-heal if missing/deleted)
+            let exe = std::env::current_exe()
+                .ok()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if !exe.is_empty() {
+                mrsh_server::service::ensure_tray_task(&exe);
+            }
+
             let port = cli.port.unwrap_or(DEFAULT_PORT);
             mrsh_server::service::run_as_service(move |cancel| {
                 let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
