@@ -3224,9 +3224,10 @@ AI USAGE:
     Tailscale installs its own firewall rules but only for the Tailscale IP —
     LAN traffic (192.168.x.x) is NOT covered and will be blocked without explicit rules.
   - WSL CONNECTIVITY: WSL cannot reach Tailscale hosts (100.x.x.x) via TCP.
-    For Tailscale targets, use the Windows mrsh client (no -p needed, auto-tries ports):
-      powershell.exe -Command "rsh -h <host> exec '<cmd>' | Out-String"
+    For Tailscale targets, use the Windows mrsh client:
+      powershell.exe -Command "& mrsh -h <host> exec '<cmd>' 2>&1 | Out-String"
     For LAN targets (192.168.x.x), WSL mrsh works directly.
+    Note: success messages go to stdout, progress/errors to stderr.
   - RELAY FALLBACK: When LAN and Tailscale both fail, try DeviceID:
       mrsh -h <DeviceID> exec '<cmd>'
     DeviceIDs are in ~/.mrsh/config. Relay races P2P and hbbr in parallel.
@@ -3264,39 +3265,49 @@ AI USAGE:
   - ALWAYS use `mrsh pack` to generate an installer. NEVER manually copy naked binaries.
     mrsh pack --platform windows --key ~/.ssh/id_ed25519.pub --port 8822 \
               --rendezvous-server rdv.pinesoft.dev:21116 -o installer.exe
-    The installer bundles: binary + authorized_keys + firewall rules + service registration.
+    The installer bundles: binary (mrsh.exe) + authorized_keys + firewall rules + service registration.
+    It also: stops old rsh/mrsh services, deletes legacy rsh.exe, cleans C:\ProgramData\remote-shell\,
+    registers new mrsh service with correct display name, launches tray in user session.
     User copies installer to target, runs as admin, done.
-  - For fleet updates (already-running machines): use `mrsh self-update` or `mrsh fleet update`.
+  - For fleet updates (already-running machines): use `mrsh self-update`:
+      mrsh -h <host> push deploy/mrsh.exe "C:\Temp\mrsh-new.exe"
+      mrsh -h <host> self-update "C:\Temp\mrsh-new.exe"
+    self-update creates a schtask that stops service, swaps binary, restarts.
     Do NOT use manual bat/ps1 scripts — self-update handles stop/swap/start automatically.
+
+  SERVICE + TRAY ARCHITECTURE:
+  - Service (port 8822): runs as SYSTEM via SCM, auto-start. Handles all commands.
+  - Tray (port 9822): runs in user session, shows system tray icon. Handles GUI commands.
+  - At service startup, `ensure_tray_task` auto-heals the tray scheduled task:
+    * Checks if mrsh-tray schtask exists → creates via XML import if missing
+    * Uses GroupId S-1-5-32-545 (Users) → task runs in interactive user session
+    * Checks if tray process is running → launches via schtasks /run if not
+  - --install registers both service AND tray task. The tray task uses XML import
+    with GroupId for correct session targeting (schtasks /create alone runs in session 0).
 
   SELF-UPDATE (existing machines):
   - CRITICAL: NEVER kill/stop/restart mrsh through its own connection using /ru SYSTEM.
     SYSTEM cannot start tray-mode apps in user desktop session — locks you out.
   - SAFE UPDATE PROCEDURE:
-    0. DETERMINE MODE: service (port 8822) or tray (port 9822)?
-       Service mode: fleet update or schtask with net stop/start mrsh is safe.
-       Tray mode: use schtask with /ru <USERNAME> (NOT /ru SYSTEM).
-    1. BEFORE touching the service, verify alternative access (SSH, WinRM, RDP).
+    1. BEFORE touching the service, verify alternative access (SSH, WinRM, RDP, debug-server).
        If mrsh is the ONLY access channel, DO NOT proceed — ask for recovery path.
-    2. Canonical install directory: C:\ProgramData\mrsh\ (auto-migrates from C:\ProgramData\remote-shell\)
-    3. Push new binary alongside: mrsh push deploy/rsh.exe "C:\ProgramData\mrsh\rsh-new.exe"
-    4. Create ONE schtask (never overwrite without verifying outcome of previous).
-    5. Wait 15s, verify: mrsh ping
-    WARNING: mrsh exec may report exit code 1 even on success (output formatting).
+    2. Canonical install directory: C:\ProgramData\mrsh\ (binary: mrsh.exe, NOT rsh.exe)
+    3. Push + self-update: mrsh push deploy/mrsh.exe "C:\Temp\mrsh-new.exe"
+       then: mrsh self-update "C:\Temp\mrsh-new.exe"
+    4. The service auto-heals the tray task on restart (ensure_tray_task).
+    5. Wait 15s, verify: mrsh -h <host> exec "hostname"
 
   GUI INTERACTION:
     Service port 8822 (SYSTEM) has NO access to user desktop session.
-    For screenshot/window list/find, launch tray-mode as logged-in user:
-      1. Find user: mrsh -p 8822 exec "quser"
-      2. Launch: schtasks /create ... /ru <USERNAME> + schtasks /run
-      3. Connect tray: mrsh -p 9822 ping
+    The tray (port 9822) runs in the user session — use it for GUI commands.
+    The service auto-launches the tray at startup via ensure_tray_task.
     Capability matrix:
       | Feature           | Port 8822 (SYSTEM) | Port 9822 (tray/user) |
       | exec, push/pull   | Yes                | Yes                   |
       | mouse/key input   | Yes (cross-session)| Yes                   |
       | window list/find  | null (no desktop)  | Yes (JSON)            |
       | screenshot        | fails              | Yes                   |
-    Cleanup: mrsh -p 8822 exec 'schtasks /delete /tn "mrsh-tray" /f'
+    If tray is not running: mrsh -p 8822 exec 'schtasks /run /tn mrsh-tray'
 
   REMOTE EXECUTION — NO ORPHAN PROCESSES:
   - Use mrsh exec DIRECTLY for commands. Do NOT create intermediate .bat/.ps1 wrappers
