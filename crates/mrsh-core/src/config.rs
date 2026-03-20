@@ -553,7 +553,7 @@ Host laptop-1
     fn session_log_dir_default() {
         let cfg = Config::parse("");
         let dir = cfg.session_log_dir();
-        assert!(dir.ends_with(".rsh/logs") || dir.ends_with(".mrsh\\logs"));
+        assert!(dir.ends_with(".mrsh/logs") || dir.ends_with(".mrsh\\logs") || dir.ends_with(".rsh/logs"));
     }
 
     #[test]
@@ -609,6 +609,6 @@ Host laptop-1
         let path = Config::default_path();
         assert!(path.is_some());
         let p = path.unwrap();
-        assert!(p.ends_with(".rsh/config") || p.ends_with(".mrsh\\config"));
+        assert!(p.ends_with(".mrsh/config") || p.ends_with(".mrsh\\config") || p.ends_with(".rsh/config"));
     }
 }
